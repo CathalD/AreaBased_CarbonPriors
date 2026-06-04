@@ -185,12 +185,17 @@ products present, 1–3), and a soil data-source map. Summary agreement:
 
 ### 4.6 Sampling design (Neyman allocation)
 
-Strata = **ESA WorldCover broad class** (forest / shrub-grass / wetland / cropland /
-other) × **uncertainty tertile bin** (`N_UNC_BINS = 3`, breaks at the 33rd/67th RSS
-uncertainty percentiles; reduced from 4 to give wider spatial spread on small budgets).
-The binning generalises to any `N_UNC_BINS`.
-Neyman optimal allocation assigns more samples to strata that are both **large** and
-**uncertain** (weight `N_h × σ_h`).
+Strata = **land-cover class** × **uncertainty tertile bin**. Only two land-cover
+classes are sampled — **Forest** (ESA WorldCover tree cover) and **Wetland**
+(GWL_FCS30 swamp / marsh / flooded-flat / saline / mangrove / salt-marsh / tidal-flat;
+open water and non-wetland excluded). The GWL_FCS30 wetland layer **overrides** the
+ESA forest layer where they overlap, so treed peatlands are counted as wetland.
+Shrub/grass and other cover are mapped for context but **not sampled**. The
+uncertainty bins use `N_UNC_BINS = 3` (breaks at the 33rd/67th percentiles of the RSS
+uncertainty); the binning generalises to any `N_UNC_BINS`.
+Neyman optimal allocation then splits points across the Forest and Wetland strata in
+proportion to **area × uncertainty** (`N_h × σ_h`), so high-uncertainty wetland — even
+where it covers little area — draws samples.
 
 v4.6 uses **largest-remainder rounding** so the per-stratum counts sum to **exactly**
 `N_FOREST_SAMPLES` / `N_SOIL_SAMPLES` — whatever is set in the config is exactly what
@@ -255,34 +260,36 @@ scale or remove `bestEffort` in `printStats`.
 
 ### 5.3 Sample allocation
 
-Uncertainty breaks (3 bins): forest p33 = 4.33, p67 = 5.20 kg/m²; soil p33 = 21.76,
-p67 = 54.26 kg/m².
+> **Pending re-run with the Forest/Wetland strata.** §4.6 was updated to stratify by
+> **Forest + Wetland (GWL_FCS30)** instead of the ESA broad classes. The allocation
+> tables below are from the previous ESA-strata run and will change — re-run
+> `[▶ RUN ALL]` and paste the two "NEYMAN ALLOCATION" Console blocks (now labelled
+> Forest / Wetland) to refresh. Carbon densities, per-product stats, CV, and the
+> power analysis (§4–§5.2) are unaffected by the strata definition.
 
-**Forest — total allocated = 10 (exact).** Σ(N_h × σ_h) ≈ 616,000.
+Uncertainty breaks (3 bins, ESA run): forest p33 = 4.33, p67 = 5.20 kg/m²;
+soil p33 = 21.76, p67 = 54.26 kg/m².
+
+**Forest — total allocated = 10 (exact).** `[RESULT: refresh with Forest/Wetland run]`
 
 | Stratum | Land cover | Unc bin | N_h (px) | σ_h | n_h |
 |---|---|---|---|---|---|
-| 3 | Forest | 0 (low) | 45,105 | 2.16 | 2 |
-| 4 | Forest | 1 (mid) | 36,063 | 4.77 | 3 |
-| 5 | Forest | 2 (high) | 39,044 | 7.80 | 5 |
+| — | Forest | 0 (low) | — | — | `[RESULT]` |
+| — | Forest | 1 (mid) | — | — | `[RESULT]` |
+| — | Forest | 2 (high) | — | — | `[RESULT]` |
+| — | Wetland | … | — | — | `[RESULT]` |
 
-**Soil — total allocated = 12 (exact).** Σ(N_h × σ_h) = 5,493,975.
+**Soil — total allocated = 12 (exact).** `[RESULT: refresh with Forest/Wetland run]`
 
 | Stratum | Land cover | Unc bin | N_h (px) | σ_h | n_h |
 |---|---|---|---|---|---|
-| 3 | Forest | 0 (low) | 44,716 | 10.88 | 1 |
-| 4 | Forest | 1 (mid) | 37,169 | 38.01 | 3 |
-| 5 | Forest | 2 (high) | 38,327 | 81.39 | 7 |
-| 8 | Shrub/Grass | 2 (high) | 3,567 | 81.39 | 1 |
+| — | Forest | 0–2 | — | — | `[RESULT]` |
+| — | Wetland | 0–2 | — | — | `[RESULT]` |
 
-**Flags.** Going from 4→3 bins distributed the forest budget across the three
-uncertainty levels (2 / 3 / 5) and reduced the number of zero-point occupied strata
-(forest 8→7, soil 9→7). Allocation still concentrates in forest because the AOI is
-forest-dominated — soil places 11 of 12 points in forest land cover and 1 in
-shrub/grass; forest places all 10 in forest land cover. Two soil strata remain below
-the advisory 2-point floor. For broader land-cover spread, the AOI would need more
-non-forest area or a larger budget; the uncertainty-bin spread is now as even as 12
-points allow.
+**Note.** With Forest + Wetland strata, Neyman now routes high-uncertainty wetland
+its proportional share even where wetland area is small. Whether wetland draws ≥1
+point depends on its area × σ relative to forest; the Console flags any occupied
+stratum that receives 0 points.
 
 ---
 

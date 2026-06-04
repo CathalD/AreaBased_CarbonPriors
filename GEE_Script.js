@@ -39,6 +39,9 @@
 //   SAMPLING — Neyman allocation uses largest-remainder rounding so
 //     the total ALWAYS equals N_FOREST_SAMPLES / N_SOIL_SAMPLES
 //     exactly. Power analysis prints the recommended n vs configured n.
+//     Strata are Forest (ESA tree cover) + Wetland (GWL_FCS30, which
+//     OVERRIDES forest where they overlap); shrub/grass/other are mapped
+//     but NOT sampled. Uncertainty binning generalised to any N_UNC_BINS.
 //   PACKAGING — [0] asset-access preflight + [▶ RUN ALL] orchestration
 //     so a partner can run end-to-end without ordering steps by hand.
 //
@@ -109,6 +112,14 @@ var COMBINED_ASSET = 'projects/north-star-project-470316/assets/combined_profile
 
 var SOTHE_FC_UNC_ASSET = 'projects/carbon-learning-library/assets/McMasterWWFCanadaforestcarbon250mkgm2uncertaintyversion1';
 var SOTHE_SC_UNC_ASSET = 'projects/carbon-learning-library/assets/McMasterWWFCanadasoilcarbon1muncertainty250mkgm2version3';
+
+// GWL_FCS30 global 30 m wetland map (Zhang et al. 2023). Wetland classes here
+// OVERRIDE the ESA forest layer for sampling; samples go only to Forest + Wetland.
+//   180 non-wetland · 181 permanent water · 182 swamp · 183 marsh ·
+//   184 flooded flat · 185 saline · 186 mangrove · 187 salt marsh · 188 tidal flat
+// WETLAND_CODES excludes 180 (non-wetland) and 181 (open water — cannot core/plot).
+var GWL_FCS30_ASSET = 'projects/sat-io/open-datasets/GWL_FCS30';
+var WETLAND_CODES   = [182, 183, 184, 185, 186, 187, 188];
 
 var EXPORT_CRS     = 'EPSG:32621';
 var EXPORT_SCALE   = 25;
@@ -431,7 +442,7 @@ function initUI() {
     'Forest: ' + N_FOREST_SAMPLES + ' pts | Soil: ' + N_SOIL_SAMPLES + ' pts (exact)\n' +
     'Carbon: AGB+BGB | AGB→C ×' + AGB_TO_C_KGM2.toFixed(3) + '\n' +
     'Ensemble: inv-var weighting (1/σ²) per pool\n' +
-    'Sampling: Neyman (exact n) | LC: ESA WorldCover | unc bins: ' + N_UNC_BINS,
+    'Sampling: Neyman (exact n) | strata: Forest + Wetland | unc bins: ' + N_UNC_BINS,
     { fontSize: '9px', color: '#aaaaaa', margin: '4px 0 0 0', whiteSpace: 'pre' }
   ));
   Map.add(mainPanel);
@@ -1306,7 +1317,7 @@ function step8_generateSampling(onDone) {
   if (!forest_nf_mask)     { setStatus('Run Step 7 first - forest mask missing.');        return; }
   if (!forest_wmean)       { setStatus('Run Step 7 first - forest weighted mean missing.'); return; }
   if (!soil_wmean)         { setStatus('Run Step 7 first - soil weighted mean missing.'); return; }
-  setStatus('Step 8: Loading ESA WorldCover land-cover strata...');
+  setStatus('Step 8: Building Forest / Wetland sampling strata...');
 
   // Fire onDone only after BOTH forest and soil sampling have finished
   var _poolsDone = 0;
@@ -1319,18 +1330,48 @@ function step8_generateSampling(onDone) {
     }
   };
 
+  // ── Land cover for stratification (v4.6): Forest vs Wetland ─────
+  // Only Forest and Wetland are sampled. Wetland comes from GWL_FCS30 and
+  // OVERRIDES the ESA forest layer where the two overlap (treed swamps are
+  // counted as wetland). Shrub/grass/other are mapped for context but are
+  // excluded from sampling. Neyman allocation then splits points across the
+  // Forest×uncertainty and Wetland×uncertainty strata, proportional to
+  // area × uncertainty (N_h × σ_h).
   var worldcover = ee.ImageCollection('ESA/WorldCover/v200').first()
     .reproject({ crs: EXPORT_CRS, scale: EXPORT_SCALE }).clip(aoi);
 
-  var lc_broad = worldcover.remap(
+  // Full ESA broad classes — context/display only, not sampled
+  var lc_full = worldcover.remap(
     [10,  20,  30,  40,  50,  60,  70,  80,  90,  95, 100],
     [ 1,   2,   2,   4,   5,   5,   5,   0,   3,   3,   2]
-  ).rename('lc_class').toInt();
-  lc_broad = lc_broad.updateMask(lc_broad.gt(0));
-
-  Map.addLayer(lc_broad, { min: 1, max: 5,
+  ).rename('lc_full').toInt();
+  Map.addLayer(lc_full.updateMask(lc_full.gt(0)), { min: 1, max: 5,
     palette: ['#006837','#addd8e','#41b6c4','#fec44f','#bdbdbd'] },
-    'ESA WorldCover Broad LC (1=Forest 2=Shrub 3=Wetland 4=Crop 5=Other)', false);
+    'ESA WorldCover Broad LC (context only — not sampled)', false);
+
+  // GWL_FCS30 wetland (most recent year). WETLAND_CODES → wetland; 180
+  // (non-wetland) and 181 (open water) are intentionally excluded.
+  var gwl = ee.ImageCollection(GWL_FCS30_ASSET)
+    .sort('system:time_start', false).first()
+    .reproject({ crs: EXPORT_CRS, scale: EXPORT_SCALE }).clip(aoi);
+  var ones = WETLAND_CODES.map(function() { return 1; });
+  var wetland_mask = gwl.remap(WETLAND_CODES, ones, 0).gt(0).rename('wetland');
+
+  // Forest = ESA tree cover (class 10)
+  var forest_lc_mask = worldcover.eq(10).rename('forest_lc');
+
+  // Sampling LC: Wetland (3) overrides Forest (1); everything else dropped
+  var lc_broad = ee.Image(0)
+    .where(forest_lc_mask, 1)
+    .where(wetland_mask,   3)
+    .rename('lc_class').toInt();
+  lc_broad = lc_broad.updateMask(lc_broad.gt(0));   // keep only Forest + Wetland
+
+  Map.addLayer(gwl.updateMask(gwl.gte(181)), { min: 180, max: 188,
+    palette: ['#CCCCCC','#0000FF','#006400','#00FF00','#00FFFF','#CC99FF','#556B2F','#FFFF99','#D2B48C'] },
+    'GWL_FCS30 Wetland Classes', false);
+  Map.addLayer(lc_broad, { min: 1, max: 3, palette: ['#006837', '#41b6c4'] },
+    'Sampling Strata LC (1=Forest 3=Wetland)', true);
 
   // Extra bands carry weighted means + σ to sampled points
   var forestExtras = forest_wmean.unmask(0)
@@ -1856,6 +1897,7 @@ function checkAssetAccess() {
     { id: AOI_ASSET,          type: 'table', required: true,  label: 'AOI boundary' },
     { id: SOTHE_FC_UNC_ASSET, type: 'image', required: true,  label: 'Sothe FC uncertainty' },
     { id: SOTHE_SC_UNC_ASSET, type: 'image', required: true,  label: 'Sothe SC uncertainty' },
+    { id: GWL_FCS30_ASSET,    type: 'image_col', required: true, label: 'GWL_FCS30 wetlands (Step 8 strata)' },
     { id: WOSIS_ASSET,        type: 'table', required: false, label: 'WOSIS field data (Step 1 only)' },
     { id: CANPEAT_ASSET,      type: 'table', required: false, label: 'CanPeat field data (Step 1 only)' },
     { id: COMBINED_ASSET,     type: 'table', required: false, label: 'Combined profiles (Step 4b only)' }
@@ -1877,9 +1919,9 @@ function checkAssetAccess() {
   };
 
   checks.forEach(function(c) {
-    var probe = (c.type === 'image')
-      ? ee.Image(c.id).bandNames()
-      : ee.FeatureCollection(c.id).limit(0).size();
+    var probe = (c.type === 'image')     ? ee.Image(c.id).bandNames()
+              : (c.type === 'image_col') ? ee.ImageCollection(c.id).limit(1).size()
+              :                            ee.FeatureCollection(c.id).limit(0).size();
     probe.evaluate(function(res, err) {
       var ok = !err && res !== null && res !== undefined;
       print('  [' + (ok ? '✓ PASS' : '✗ FAIL') + '] ' +
@@ -1927,7 +1969,7 @@ print('Carbon: AGB→C factor = ' + AGB_TO_C_KGM2.toFixed(3) +
 print('Ensemble: inverse-variance weighting (w_i = 1/σ_i²) per pool');
 print('Forest σ: GEDI RF = 3-fold CV | Sothe FC = per-pixel | SCANFI = ' + SCANFI_SIGMA_FC.toFixed(3) + ' kg/m²');
 print('Soil   σ: Sothe SC = per-pixel | SoilGrids = standardized(Sothe unc + inter-product SD)');
-print('Sampling: Neyman (largest-remainder, exact n) | LC: ESA WorldCover v200 × ' + N_UNC_BINS + ' unc bins');
+print('Sampling: Neyman (largest-remainder, exact n) | strata: Forest + Wetland (GWL_FCS30) × ' + N_UNC_BINS + ' unc bins');
 print('Partner flow: [0] Check Asset Access → [▶ RUN ALL] → Tasks tab → run exports.');
 
 try { initUI(); } catch(e) {
