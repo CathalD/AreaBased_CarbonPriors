@@ -1,6 +1,47 @@
 // =================================================================
-// Charlie's Place KBA — Forest Carbon Assessment v4.5
+// Charlie's Place KBA — Forest Carbon Assessment v4.6
 // =================================================================
+//
+//  ┌─────────────────────────────────────────────────────────────┐
+//  │  PARTNER SETUP — READ BEFORE RUNNING                          │
+//  ├─────────────────────────────────────────────────────────────┤
+//  │ 1. ACCESS: this script reads several Earth Engine assets that │
+//  │    must be shared with the account running it (or made        │
+//  │    public). Click [0] Check Asset Access first — it reports    │
+//  │    which assets are readable before you run anything.          │
+//  │    Required for the core analysis (Steps 2-9):                 │
+//  │      • AOI_ASSET            (your project boundary)            │
+//  │      • SOTHE_FC_UNC_ASSET   (Sothe forest-carbon uncertainty)  │
+//  │      • SOTHE_SC_UNC_ASSET   (Sothe soil-carbon uncertainty)    │
+//  │    Optional (Step 1 / Step 4b field-data exports only):        │
+//  │      • WOSIS / CANPEAT / COMBINED assets                       │
+//  │ 2. CONFIGURE: set AOI_ASSET to your boundary and adjust        │
+//  │    N_FOREST_SAMPLES / N_SOIL_SAMPLES in SECTION A. Whatever    │
+//  │    you enter is the EXACT number of points produced.          │
+//  │ 3. RUN: click [▶ RUN ALL] to execute Steps 2-9 in order, or    │
+//  │    run the numbered buttons one at a time.                     │
+//  │ 4. EXPORT: open the Tasks tab (top-right) and click Run on     │
+//  │    each export to save rasters / sampling points to Drive.     │
+//  └─────────────────────────────────────────────────────────────┘
+//
+// Changes from v4.5 (v4.6):
+//   CARBON UNITS — all forest members harmonised to AGB+BGB carbon
+//     (the quantity the Sothe 2022 map represents). New constants
+//     BGB_RATIO=0.22, CARBON_FRACTION=0.5, MGHA_TO_KGM2=0.1 →
+//     AGB_TO_C_KGM2 = 0.061. GEDI RF and SCANFI (and their σ) now use
+//     this factor; previously GEDI was biomass (×0.1, no C fraction)
+//     and SCANFI was aboveground-only carbon (×0.05) — incomparable.
+//   ENSEMBLE — equal-weight forest ensemble now uses the same 3
+//     members as the weighted one (GEDI RF + Sothe FC + SCANFI; was
+//     SBFI). Weighted mean now honours the ≥2-members rule via per-
+//     member zero-weighting instead of silently requiring all three.
+//   dsm_forest now reports # of forest products present (1–3).
+//   SAMPLING — Neyman allocation uses largest-remainder rounding so
+//     the total ALWAYS equals N_FOREST_SAMPLES / N_SOIL_SAMPLES
+//     exactly. Power analysis prints the recommended n vs configured n.
+//   PACKAGING — [0] asset-access preflight + [▶ RUN ALL] orchestration
+//     so a partner can run end-to-end without ordering steps by hand.
+//
 // Changes from v4.4:
 //
 //   Global constants:
@@ -98,11 +139,25 @@ var GEDI_SAMPLE_SCALE = 100;
 var GEDI_NUM_PIXELS   = 3000;
 
 var N_UNC_BINS          = 4;
-var MIN_PTS_PER_STRATUM = 3;
+var MIN_PTS_PER_STRATUM = 2;   // advisory floor; exact total (above) always wins (v4.6)
 
-// v4.5: SCANFI constant σ = Guindon 2024 AGB RMSE converted to FC kg/m²
-// RMSE 38.70 t/ha (Mg/ha) × 0.1 (Mg/ha → kg/m²) × 0.5 (IPCC carbon fraction) = 1.935
-var SCANFI_SIGMA_FC = 1.935;   // kg C/m², constant across AOI
+// ── Carbon conversion constants (v4.6) ───────────────────────────
+// All forest members are harmonised to the SAME quantity as the Sothe et al.
+// (2022) forest carbon map: TOTAL biomass carbon = aboveground + belowground.
+//   BGB (belowground/root biomass) = BGB_RATIO × AGB
+//   Carbon (kg C/m²) = AGB(Mg/ha) × (1 + BGB_RATIO) × CARBON_FRACTION × MGHA_TO_KGM2
+// GEDI L4A AGBD and SCANFI biomass are AGB-only, so both receive this factor.
+// NOTE: Sothe additionally includes dead-plant carbon and used forest-type-
+// specific root ratios; BGB_RATIO here is a single national approximation.
+var BGB_RATIO       = 0.22;    // belowground:aboveground biomass ratio
+var CARBON_FRACTION = 0.50;    // IPCC dry-biomass carbon fraction
+var MGHA_TO_KGM2    = 0.10;    // Mg/ha → kg/m²
+var AGB_TO_C_KGM2   = (1 + BGB_RATIO) * CARBON_FRACTION * MGHA_TO_KGM2;  // = 0.061
+
+// SCANFI constant σ = Guindon 2024 AGB RMSE 38.70 t/ha, converted with the
+// SAME AGB→carbon factor so it lives in the ensemble's carbon units.
+var SCANFI_RMSE_AGB_MGHA = 38.70;                              // Guindon 2024 AGB RMSE (t/ha)
+var SCANFI_SIGMA_FC      = SCANFI_RMSE_AGB_MGHA * AGB_TO_C_KGM2;  // ≈ 2.361 kg C/m²
 
 var AGBD_VIS = {
   min: 0, max: 250,
@@ -136,7 +191,7 @@ var sothe_fc            = null;
 var sothe_fc_unc        = null;
 var sothe_sc            = null;
 var sothe_sc_unc        = null;
-var scanfi_fc           = null;   // SCANFI FC (kg/m²): AGB × 0.05
+var scanfi_fc           = null;   // SCANFI FC (kg/m²): AGB × AGB_TO_C_KGM2 (AGB+BGB carbon)
 var sg_soc_1m           = null;
 var soil_prior_mean     = null;
 var scanfi_img          = null;
@@ -174,7 +229,7 @@ var agbd_modeled     = null;
 
 // v4.5: 3-fold CV and inverse-variance weighted ensemble globals
 var GEDI_RF_RMSE_MGHA   = null;   // mean 3-fold CV RMSE (Mg/ha AGBD)
-var GEDI_RF_SIGMA_KGPM2 = null;   // converted to FC kg/m²: RMSE × 0.1
+var GEDI_RF_SIGMA_KGPM2 = null;   // converted to FC kg/m²: RMSE × AGB_TO_C_KGM2 (AGB+BGB)
 var forest_wmean        = null;   // inv-var weighted forest carbon (kg/m²)
 var forest_wmean_sigma  = null;   // combined σ from inv-var weighting (kg/m²)
 var soil_wmean          = null;   // inv-var weighted soil carbon (kg/m²)
@@ -334,11 +389,21 @@ function initUI() {
   mainPanel.add(ui.Label("Charlie's Place KBA", {
     fontWeight: 'bold', fontSize: '16px', color: '#111111', margin: '0 0 2px 0'
   }));
-  mainPanel.add(ui.Label('Forest Carbon Assessment v4.5', {
+  mainPanel.add(ui.Label('Forest Carbon Assessment v4.6', {
     fontSize: '12px', color: '#555555', margin: '0 0 12px 0'
   }));
-  mainPanel.add(makeSectionLabel('PIPELINE'));
-  mainPanel.add(makeButton('[1] Import Raw Field Data',             step1_importRawData));
+
+  mainPanel.add(makeSectionLabel('SETUP / ONE-CLICK'));
+  mainPanel.add(makeButton('[0] Check Asset Access', checkAssetAccess));
+  mainPanel.add(ui.Button({
+    label: '[▶ RUN ALL]  Steps 2 → 9',
+    onClick: runAll,
+    style: { width: '260px', margin: '2px 0 8px 0', fontSize: '11px',
+             color: '#ffffff', backgroundColor: '#2e7d32', fontWeight: 'bold' }
+  }));
+
+  mainPanel.add(makeSectionLabel('PIPELINE (manual / step-by-step)'));
+  mainPanel.add(makeButton('[1] Import Raw Field Data (optional)',  step1_importRawData));
   mainPanel.add(makeButton('[2] Import Raster Priors',              step2_importRasterPriors));
   mainPanel.add(makeButton('[3] GEDI + CHMs + SCANFI FC',           step3_importGEDI));
   mainPanel.add(makeButton('[4] Build Covariates + Var Selection',   step4_buildCovariates));
@@ -363,9 +428,10 @@ function initUI() {
   mainPanel.add(statusLabel);
   mainPanel.add(ui.Label(
     'Scale: ' + EXPORT_SCALE + 'm | CRS: UTM Zone 21N\n' +
-    'Forest: ' + N_FOREST_SAMPLES + ' pts | Soil: ' + N_SOIL_SAMPLES + ' pts\n' +
+    'Forest: ' + N_FOREST_SAMPLES + ' pts | Soil: ' + N_SOIL_SAMPLES + ' pts (exact)\n' +
+    'Carbon: AGB+BGB | AGB→C ×' + AGB_TO_C_KGM2.toFixed(3) + '\n' +
     'Ensemble: inv-var weighting (1/σ²) per pool\n' +
-    'Sampling: Neyman | LC: ESA WorldCover | unc bins: ' + N_UNC_BINS,
+    'Sampling: Neyman (exact n) | LC: ESA WorldCover | unc bins: ' + N_UNC_BINS,
     { fontSize: '9px', color: '#aaaaaa', margin: '4px 0 0 0', whiteSpace: 'pre' }
   ));
   Map.add(mainPanel);
@@ -449,7 +515,7 @@ function step1_importRawData() {
 // ─────────────────────────────────────────────────────────────────
 // STEP 2 — RASTER PRIORS
 // ─────────────────────────────────────────────────────────────────
-function step2_importRasterPriors() {
+function step2_importRasterPriors(onDone) {
   setStatus('Step 2: Loading raster priors...');
 
   sothe_fc = ee.ImageCollection('projects/sat-io/open-datasets/carbon_stocks_ca/fc')
@@ -517,16 +583,18 @@ function step2_importRasterPriors() {
 
   markDone(1);
   setStatus('Step 2 complete - raster priors, Sothe uncertainty, and Google Embedding loaded.');
+  if (typeof onDone === 'function') onDone();
 }
 
 
 // ─────────────────────────────────────────────────────────────────
 // STEP 3 — GEDI + CANOPY HEIGHT MODELS + SCANFI FOREST CARBON
 //
-// SCANFI AGB (band[0], Mg/ha) → forest carbon (kg/m²):
-//   AGB × 0.1 (Mg/ha → kg/m²) × 0.5 (IPCC carbon fraction) = AGB × 0.05
+// SCANFI AGB (band[0], Mg/ha) → forest carbon (kg/m², AGB+BGB):
+//   AGB × (1+BGB_RATIO) × CARBON_FRACTION × MGHA_TO_KGM2 = AGB × AGB_TO_C_KGM2 (= 0.061)
+//   (v4.6: was AGB × 0.05 — aboveground-only carbon, inconsistent with Sothe)
 // ─────────────────────────────────────────────────────────────────
-function step3_importGEDI() {
+function step3_importGEDI(onDone) {
   setStatus('Step 3: Loading GEDI L2A and L4A...');
 
   var l2a_col = ee.ImageCollection('LARSE/GEDI/GEDI02_A_002_MONTHLY')
@@ -544,7 +612,8 @@ function step3_importGEDI() {
   gedi_l4a_col.size().evaluate(function(n) { print('GEDI L4A images in buffer:', n); });
 
   gedi_l2a     = l2a_col.median().clip(aoi);
-  gedi_agbd_se = gedi_l4a_col.select('agbd_se').mean().multiply(0.1).rename('agbd_se_kgm2').clip(aoi);
+  // GEDI AGBD SE → carbon σ (AGB+BGB, kg C/m²), same factor as the mean
+  gedi_agbd_se = gedi_l4a_col.select('agbd_se').mean().multiply(AGB_TO_C_KGM2).rename('agbd_se_kgm2').clip(aoi);
 
   var shot_density = l2a_col.map(function(img) {
     return img.select('rh98').mask().rename('shot');
@@ -579,11 +648,11 @@ function step3_importGEDI() {
   printMeanDiff(meta_ch,     'meta_ch',   'Meta CHM');
   printMeanDiff(scanfi_ch,   'scanfi_ch', 'SCANFI CHM');
 
-  // SCANFI AGB → Forest Carbon
-  scanfi_fc = scanfi_img.select([0]).multiply(0.05).rename('scanfi_fc').clip(aoi);
+  // SCANFI AGB → Forest Carbon (AGB+BGB, kg C/m²) via AGB_TO_C_KGM2
+  scanfi_fc = scanfi_img.select([0]).multiply(AGB_TO_C_KGM2).rename('scanfi_fc').clip(aoi);
   addLayerWithStats(scanfi_fc, 'scanfi_fc',
     { min: 0, max: 20, palette: ['#f7fcf5', '#74c476', '#00441b'] },
-    'SCANFI Forest Carbon (kg/m2) [σ=1.935 constant]', aoi, 25);
+    'SCANFI Forest Carbon (kg/m2) [AGB+BGB; σ=' + SCANFI_SIGMA_FC.toFixed(3) + ' constant]', aoi, 25);
 
   var fc_diff = sothe_fc.subtract(scanfi_fc).rename('sothe_minus_scanfi_fc');
   addLayerWithStats(fc_diff, 'sothe_minus_scanfi_fc',
@@ -600,13 +669,14 @@ function step3_importGEDI() {
 
   markDone(2);
   setStatus('Step 3 complete - GEDI, CHMs, and SCANFI FC loaded.');
+  if (typeof onDone === 'function') onDone();
 }
 
 
 // ─────────────────────────────────────────────────────────────────
 // STEP 4 — BUILD COVARIATE STACK + PILOT RF
 // ─────────────────────────────────────────────────────────────────
-function step4_buildCovariates() {
+function step4_buildCovariates(onDone) {
   if (!gedi_l2a) { setStatus('Run Step 3 first.'); return; }
   setStatus('Step 4: Building covariate stack...');
 
@@ -708,11 +778,11 @@ function step4_buildCovariates() {
     Map.addLayer(covariates.select('tpi').clip(aoi), { min: -30, max: 30, palette: ['#4575b4','#ffffbf','#d73027'] },
       'TPI', false);
 
-    _step4_pilotRF(goodBands);
+    _step4_pilotRF(goodBands, onDone);
   });
 }
 
-function _step4_pilotRF(goodBands) {
+function _step4_pilotRF(goodBands, onDone) {
   var gedi_raw = ee.ImageCollection('LARSE/GEDI/GEDI04_A_002_MONTHLY')
     .filterDate(GEDI_START, GEDI_END).filterBounds(aoi_buffer)
     .map(function(img) {
@@ -777,6 +847,7 @@ function _step4_pilotRF(goodBands) {
       markDone(3);
       insertSnapshotButton();
       setStatus('Step 4 complete. Use [4b] to export covariate snapshot.');
+      if (typeof onDone === 'function') onDone();
     });
   });
 }
@@ -791,8 +862,10 @@ function _step4_pilotRF(goodBands) {
 //
 // Interpreting OOB / CV RMSE for this AOI:
 //   The RMSE is computed in AGBD units (Mg/ha), then converted to
-//   forest carbon (kg/m²) via × 0.1 (unit) × 1.0 (already carbon
-//   fraction implicit in GEDI L4A AGBD model).
+//   forest carbon (kg/m²) via AGB_TO_C_KGM2 = (1+BGB_RATIO) ×
+//   CARBON_FRACTION × MGHA_TO_KGM2 (= 0.061). GEDI L4A is aboveground
+//   BIOMASS density, so the carbon fraction and BGB uplift are required
+//   to match Sothe FC (total biomass carbon).
 //   A lower RMSE = the RF predictions are closer to held-out GEDI
 //   footprint values = higher weight in the ensemble.
 //   Note: GEDI L4A AGBD has its own prediction error (agbd_se).
@@ -800,7 +873,7 @@ function _step4_pilotRF(goodBands) {
 //   the absolute uncertainty in the true forest carbon stock.
 //   Field sampling provides ground truth to update all estimates.
 // ─────────────────────────────────────────────────────────────────
-function step5_trainFinalGEDI() {
+function step5_trainFinalGEDI(onDone) {
   if (!covariates)    { setStatus('Run Step 4 first - covariates not built.'); return; }
   if (!TOP_BANDS_EE)  { setStatus('Run Step 4 first - variable selection not done.'); return; }
   if (!gedi_training) { setStatus('Run Step 4 first - GEDI training data not loaded.'); return; }
@@ -832,7 +905,8 @@ function step5_trainFinalGEDI() {
   var agbd_mgha = covariates.select(TOP_BANDS_EE).classify(finalRF).clip(aoi).rename('agbd_mgha');
   agbd_mgha     = agbd_mgha.updateMask(agbd_mgha.gte(0).and(agbd_mgha.lte(600)));
   agbd_modeled  = agbd_mgha.rename('agbd_modeled');
-  forest_rf_pred = agbd_mgha.multiply(0.1).rename('forest_carbon_kgm2');
+  // GEDI AGBD (Mg/ha) → forest carbon (kg C/m², AGB+BGB) via AGB_TO_C_KGM2
+  forest_rf_pred = agbd_mgha.multiply(AGB_TO_C_KGM2).rename('forest_carbon_kgm2');
 
   agbd_mgha.reduceRegion({
     reducer: ee.Reducer.mean().combine(ee.Reducer.min(), null, true)
@@ -886,7 +960,8 @@ function step5_trainFinalGEDI() {
 
     var r0 = rmses[0], r1 = rmses[1], r2 = rmses[2];
     var mean_rmse_mgha = (r0 + r1 + r2) / 3.0;
-    var mean_rmse_kgm2 = mean_rmse_mgha * 0.1;
+    // Convert AGBD RMSE (Mg/ha) → carbon σ (kg C/m², AGB+BGB), same factor as the mean
+    var mean_rmse_kgm2 = mean_rmse_mgha * AGB_TO_C_KGM2;
 
     GEDI_RF_RMSE_MGHA   = mean_rmse_mgha;
     GEDI_RF_SIGMA_KGPM2 = mean_rmse_kgm2;
@@ -898,7 +973,7 @@ function step5_trainFinalGEDI() {
     print('  Fold 2  RMSE: ' + r2.toFixed(2) + ' Mg/ha AGBD');
     print('  ──────────────────────────────────────────────────────────────');
     print('  Mean 3-fold CV RMSE:  ' + mean_rmse_mgha.toFixed(2) + ' Mg/ha AGBD');
-    print('  Forest carbon σ:      ' + mean_rmse_kgm2.toFixed(3) + ' kg C/m²  (RMSE × 0.1)');
+    print('  Forest carbon σ:      ' + mean_rmse_kgm2.toFixed(3) + ' kg C/m²  (RMSE × ' + AGB_TO_C_KGM2.toFixed(3) + ', AGB+BGB)');
     print('');
     print('  Interpretation:');
     print('    The CV RMSE measures how well the RF predicts held-out GEDI');
@@ -912,6 +987,7 @@ function step5_trainFinalGEDI() {
 
     markDone(4);
     setStatus('Step 5 complete — CV RMSE: ' + mean_rmse_kgm2.toFixed(3) + ' kg/m². Export queued.');
+    if (typeof onDone === 'function') onDone();
   });
 }
 
@@ -919,7 +995,7 @@ function step5_trainFinalGEDI() {
 // ─────────────────────────────────────────────────────────────────
 // STEP 6 — SOIL SOURCE VERIFICATION
 // ─────────────────────────────────────────────────────────────────
-function step6_buildSoilModel() {
+function step6_buildSoilModel(onDone) {
   if (!sothe_sc)  { setStatus('Run Step 2 first - Sothe SC not loaded.'); return; }
   if (!sg_soc_1m) { setStatus('Run Step 2 first - SoilGrids not loaded.'); return; }
 
@@ -939,6 +1015,7 @@ function step6_buildSoilModel() {
 
   markDone(5);
   setStatus('Step 6 complete - soil sources verified. Run Step 7 to build ensemble.');
+  if (typeof onDone === 'function') onDone();
 }
 
 
@@ -978,7 +1055,7 @@ function step6_buildSoilModel() {
 // forest_nf_mask updated to use forest_wmean.
 // total_ecosystem_c_w = forest_wmean + soil_wmean.
 // ─────────────────────────────────────────────────────────────────
-function step7_buildEnsemble() {
+function step7_buildEnsemble(onDone) {
   if (!forest_rf_pred)      { setStatus('Run Step 5 first - forest RF missing.'); return; }
   if (!GEDI_RF_SIGMA_KGPM2) { setStatus('Run Step 5 first - 3-fold CV RMSE not computed.'); return; }
   if (!sothe_sc)            { setStatus('Run Step 2 first - Sothe SC missing.'); return; }
@@ -992,10 +1069,12 @@ function step7_buildEnsemble() {
   setStatus('Step 7: Building equal-weight reference ensemble...');
 
   // ── Equal-weight forest ensemble (kept for comparison) ─────────
-  var sbfi_kgm2 = sbfi_agb_raster.select('sbfi_agb_avg').multiply(0.1).rename('sbfi_fc').clip(aoi);
+  // v4.6: uses the SAME 3 members as the weighted ensemble (GEDI RF, Sothe FC,
+  // SCANFI) so "weighted vs equal-weight" is a like-for-like comparison.
+  // (was GEDI RF + Sothe FC + SBFI, which had no σ for the weighted version.)
   var forest_eq_stack = forest_rf_pred.rename('gedi_rf')
     .addBands(sothe_fc.rename('sothe_fc'))
-    .addBands(sbfi_kgm2.rename('sbfi_fc'));
+    .addBands(scanfi_fc.rename('scanfi_fc'));
   var f_count   = forest_eq_stack.reduce(ee.Reducer.count()).rename('f_model_count');
   var f_mask_eq = f_count.gte(2);
   forest_ens_mean = forest_eq_stack.reduce(ee.Reducer.mean()).updateMask(f_mask_eq).rename('forest_ens_mean');
@@ -1017,31 +1096,44 @@ function step7_buildEnsemble() {
     .sqrt().updateMask(s_mask_eq).rename('soil_uncertainty_rss');
 
   // ── Inverse-variance weighted forest ensemble ──────────────────
-  // Forest is built synchronously — all σ values are already known
-  // (GEDI RF: JS scalar; Sothe FC: image; SCANFI: JS scalar).
+  // v4.6: members that are absent at a pixel contribute zero weight (rather
+  // than nulling the whole sum). Each weighted term and its weight are set to
+  // 0 where the member is masked, so Σ[w·x] / Σ[w] is taken over only the
+  // members actually present. The result is then masked to require ≥2 members
+  // (f_mask_eq), so the "≥2 of 3" rule is genuinely honoured.
   setStatus('Step 7: Building inverse-variance weighted ensembles...');
 
   var sigma_gedi_img   = ee.Image.constant(GEDI_RF_SIGMA_KGPM2).rename('sigma_gedi');
   var sigma_sothe_f    = sothe_fc_unc.rename('sigma_sothe_f');
   var sigma_scanfi_img = ee.Image.constant(SCANFI_SIGMA_FC).rename('sigma_scanfi');
 
-  var w_gedi_f   = sigma_gedi_img.pow(2).pow(-1);
-  var w_sothe_f  = sigma_sothe_f.pow(2).pow(-1);
-  var w_scanfi_f = sigma_scanfi_img.pow(2).pow(-1);
-  var w_sum_f    = w_gedi_f.add(w_sothe_f).add(w_scanfi_f).updateMask(f_mask_eq);
+  // Per-member presence masks
+  var m_gedi   = forest_rf_pred.mask();
+  var m_sothe  = sothe_fc.mask();
+  var m_scanfi = scanfi_fc.mask();
 
-  forest_wmean = forest_rf_pred.multiply(w_gedi_f)
-    .add(sothe_fc.multiply(w_sothe_f))
-    .add(scanfi_fc.multiply(w_scanfi_f))
+  // Effective weights (0 where member absent)
+  var we_gedi   = sigma_gedi_img.pow(2).pow(-1).multiply(m_gedi).unmask(0);
+  var we_sothe  = sigma_sothe_f.pow(2).pow(-1).multiply(m_sothe).unmask(0);
+  var we_scanfi = sigma_scanfi_img.pow(2).pow(-1).multiply(m_scanfi).unmask(0);
+
+  // Weighted value terms (0 where member absent)
+  var wx_gedi   = forest_rf_pred.unmask(0).multiply(we_gedi);
+  var wx_sothe  = sothe_fc.unmask(0).multiply(we_sothe);
+  var wx_scanfi = scanfi_fc.unmask(0).multiply(we_scanfi);
+
+  var w_sum_f = we_gedi.add(we_sothe).add(we_scanfi);
+
+  forest_wmean = wx_gedi.add(wx_sothe).add(wx_scanfi)
     .divide(w_sum_f)
+    .updateMask(f_mask_eq)
     .rename('forest_wmean');
 
-  forest_wmean_sigma = w_sum_f.pow(-0.5).rename('forest_wmean_sigma');
+  forest_wmean_sigma = w_sum_f.pow(-0.5).updateMask(f_mask_eq).rename('forest_wmean_sigma');
   forest_nf_mask     = forest_wmean.gt(FOREST_THRESHOLD);
 
-  // Data-source maps
-  dsm_forest = ee.Image(1).where(forest_rf_pred.mask().not(), ee.Image(2))
-    .clip(aoi).rename('forest_data_source');
+  // Data-source map: number of forest products present per pixel (1–3)
+  dsm_forest = f_count.clip(aoi).rename('forest_data_source');
   dsm_soil = ee.Image(1)
     .where(sothe_sc.mask().not(),   ee.Image(2))
     .where(sg_soc_1m.mask().not(), ee.Image(3))
@@ -1057,9 +1149,9 @@ function step7_buildEnsemble() {
   print('');
   print('══ INVERSE-VARIANCE WEIGHTED ENSEMBLE — Forest ═══════════════');
   print('  σ per product:');
-  print('    GEDI RF:  [constant]  ' + GEDI_RF_SIGMA_KGPM2.toFixed(3) + ' kg/m²  (3-fold CV RMSE × 0.1)');
+  print('    GEDI RF:  [constant]  ' + GEDI_RF_SIGMA_KGPM2.toFixed(3) + ' kg/m²  (3-fold CV RMSE × ' + AGB_TO_C_KGM2.toFixed(3) + ', AGB+BGB)');
   print('    Sothe FC: [per-pixel] see map layer "Sothe FC Uncertainty"');
-  print('    SCANFI:   [constant]  ' + SCANFI_SIGMA_FC.toFixed(3) + ' kg/m²  (Guindon 2024 RMSE)');
+  print('    SCANFI:   [constant]  ' + SCANFI_SIGMA_FC.toFixed(3) + ' kg/m²  (Guindon 2024 RMSE × ' + AGB_TO_C_KGM2.toFixed(3) + ')');
   print('  Formula: w_i(p) = 1/σ_i(p)²  |  wmean(p) = Σ[w_i·x_i] / Σ[w_i]');
   print('══════════════════════════════════════════════════════════════════');
   print('');
@@ -1186,14 +1278,15 @@ function step7_buildEnsemble() {
     Map.addLayer(total_ecosystem_c,   totalVis,
       'Total Ecosystem Carbon - Equal-weight (kg/m2)', false);
     Map.addLayer(dsm_forest,
-      { min: 1, max: 2, palette: ['#2ca25f', '#feb24c'] },
-      'Forest Data Source (1=GEDI RF 2=Sothe FC)', false);
+      { min: 1, max: 3, palette: ['#feb24c', '#74c476', '#006837'] },
+      'Forest Data Source (# products present: 1–3)', false);
     Map.addLayer(dsm_soil,
       { min: 1, max: 4, palette: ['#2ca25f', '#feb24c', '#de2d26', '#969696'] },
       'Soil Data Source (1=Both 2=SG only 3=Sothe only 4=Neither)', false);
 
     markDone(6);
     setStatus('Step 7 complete - inverse-variance weighted ensembles built.');
+    if (typeof onDone === 'function') onDone();
 
     }); // end soil_ens_sd evaluate()
   }); // end sothe_sc_unc evaluate()
@@ -1207,13 +1300,24 @@ function step7_buildEnsemble() {
 // RSS uncertainty images retained as stratification signal since
 // they represent the full spread across all error sources.
 // ─────────────────────────────────────────────────────────────────
-function step8_generateSampling() {
+function step8_generateSampling(onDone) {
   if (!forest_uncertainty) { setStatus('Run Step 7 first - forest uncertainty missing.'); return; }
   if (!soil_uncertainty)   { setStatus('Run Step 7 first - soil uncertainty missing.');   return; }
   if (!forest_nf_mask)     { setStatus('Run Step 7 first - forest mask missing.');        return; }
   if (!forest_wmean)       { setStatus('Run Step 7 first - forest weighted mean missing.'); return; }
   if (!soil_wmean)         { setStatus('Run Step 7 first - soil weighted mean missing.'); return; }
   setStatus('Step 8: Loading ESA WorldCover land-cover strata...');
+
+  // Fire onDone only after BOTH forest and soil sampling have finished
+  var _poolsDone = 0;
+  var _afterPool = function() {
+    _poolsDone += 1;
+    if (_poolsDone === 2) {
+      markDone(7);
+      setStatus('Step 8 complete - Neyman-allocated sampling points generated.');
+      if (typeof onDone === 'function') onDone();
+    }
+  };
 
   var worldcover = ee.ImageCollection('ESA/WorldCover/v200').first()
     .reproject({ crs: EXPORT_CRS, scale: EXPORT_SCALE }).clip(aoi);
@@ -1256,6 +1360,7 @@ function step8_generateSampling() {
       pts.size().evaluate(function(n) {
         Map.addLayer(pts, { color: '1565c0' }, 'Forest Sampling Points - Neyman (' + n + ')', true);
         print('Forest Neyman sampling complete: ' + n + ' points.');
+        _afterPool();
       });
     }
   );
@@ -1267,8 +1372,7 @@ function step8_generateSampling() {
       pts.size().evaluate(function(n) {
         Map.addLayer(pts, { color: 'e65100' }, 'Soil Sampling Points - Neyman (' + n + ')', true);
         print('Soil Neyman sampling complete: ' + n + ' points.');
-        markDone(7);
-        setStatus('Step 8 complete - Neyman-allocated sampling points generated.');
+        _afterPool();
       });
     }
   );
@@ -1341,21 +1445,58 @@ function _neymanSample(unc_img, unc_band, lc_img, lc_band, extra_bands, n_total,
       var lcNames = ['?','Forest','Shrub/Grass','Wetland','Cropland','Other'];
       print('NEYMAN ALLOCATION - ' + pool_label);
       print('  Total Neyman weight Σ(N_h × σ_h) = ' + totalWeight.toFixed(2));
-      print('  Strata:');
 
+      // ── Largest-remainder allocation → sums to EXACTLY n_total (v4.6) ──
+      // Eligible strata = occupied (N_h>0) with positive Neyman weight.
+      // Each gets floor(ideal); the leftover points go to the largest
+      // fractional remainders. This guarantees Σ n_h = n_total, unlike the
+      // previous per-stratum max(MIN, round(...)) which could overshoot.
+      var elig = [];
       keys.forEach(function(h) {
-        var s = strata[h]; if (!s) return;
-        var n_h = (totalWeight > 0 && s.w > 0)
-          ? Math.max(MIN_PTS_PER_STRATUM, Math.round(n_total * s.w / totalWeight))
-          : (s.N > 0 ? MIN_PTS_PER_STRATUM : null);
-        if (n_h === null) return;
-        print('    h=' + h + ' (' + (lcNames[s.lc]||'LC'+s.lc) + ', bin=' + s.bin + ')' +
-              '  N_h=' + s.N.toFixed(0) + '  σ_h=' + s.sigma.toFixed(4) + '  n_h=' + n_h);
-        classValues.push(parseInt(h));
-        classPoints.push(n_h);
+        var s = strata[h];
+        if (s && s.w > 0 && s.N > 0) elig.push({ h: parseInt(h), s: s, base: 0, rem: 0 });
+      });
+
+      if (elig.length === 0 || totalWeight <= 0) {
+        setStatus(pool_label + ': no valid strata.'); return;
+      }
+
+      var assigned = 0;
+      elig.forEach(function(e) {
+        var ideal = n_total * e.s.w / totalWeight;
+        e.base = Math.floor(ideal);
+        e.rem  = ideal - e.base;
+        assigned += e.base;
+      });
+      var remaining = n_total - assigned;
+      // Hand out remaining points to the largest fractional remainders, looping
+      // if n_total exceeds the stratum count (so totals always reconcile).
+      elig.sort(function(a, b) { return b.rem - a.rem; });
+      var gi = 0;
+      while (remaining > 0) { elig[gi % elig.length].base += 1; remaining--; gi++; }
+
+      // Emit in stratum order; keep only strata that received ≥1 point
+      var nZero = 0, nBelowFloor = 0;
+      elig.sort(function(a, b) { return a.h - b.h; });
+      print('  Strata (largest-remainder, exact total):');
+      elig.forEach(function(e) {
+        var s = e.s;
+        if (e.base === 0) { nZero++; return; }
+        if (e.base < MIN_PTS_PER_STRATUM) nBelowFloor++;
+        print('    h=' + e.h + ' (' + (lcNames[s.lc]||'LC'+s.lc) + ', bin=' + s.bin + ')' +
+              '  N_h=' + s.N.toFixed(0) + '  σ_h=' + s.sigma.toFixed(4) + '  n_h=' + e.base);
+        classValues.push(e.h);
+        classPoints.push(e.base);
       });
       print('  Total allocated = ' + classPoints.reduce(function(a,b){return a+b;},0) +
-            '  (target = ' + n_total + ')');
+            '  (target = ' + n_total + ', EXACT)');
+      if (nZero > 0)
+        print('  NOTE: ' + nZero + ' occupied stratum/strata received 0 points — ' +
+              'n_total is small relative to the number of strata. Increase ' +
+              'N or reduce N_UNC_BINS to spread coverage.');
+      if (nBelowFloor > 0)
+        print('  NOTE: ' + nBelowFloor + ' stratum/strata below the advisory floor of ' +
+              MIN_PTS_PER_STRATUM + ' points (variance there will be poorly estimated).');
 
       if (classValues.length === 0) { setStatus(pool_label + ': no valid strata.'); return; }
 
@@ -1408,18 +1549,29 @@ function _powerAnalysis() {
     print('FOREST (forested pixels only, weighted mean):');
     print('  μ = ' + f_mean.toFixed(3) + ' kg/m²  |  σ = ' + f_sd.toFixed(3) +
           ' kg/m²  |  CV = ' + (f_cv*100).toFixed(1) + '%');
-    print('  n_min for ±20% MOE:  ' + f_nmin);
-    print('  Allocated n = ' + N_FOREST_SAMPLES + '  →  expected MOE = ±' +
+    print('  n_min for ±20% MOE (SRS):  ' + f_nmin);
+    print('  Configured n = ' + N_FOREST_SAMPLES + '  →  expected MOE = ±' +
           (100*t90*f_cv/Math.sqrt(N_FOREST_SAMPLES)).toFixed(1) + '%' +
           ((100*t90*f_cv/Math.sqrt(N_FOREST_SAMPLES)) <= 20 ? '  ✓' : '  ⚠'));
+    print('  RECOMMENDATION: ' + (N_FOREST_SAMPLES >= f_nmin
+          ? 'configured n meets the ±20% target.'
+          : 'increase N_FOREST_SAMPLES to ≥ ' + f_nmin + ' to meet ±20% (SRS bound).'));
     print('');
     print('SOIL (full AOI, weighted mean):');
     print('  μ = ' + s_mean.toFixed(3) + ' kg/m²  |  σ = ' + s_sd.toFixed(3) +
           ' kg/m²  |  CV = ' + (s_cv*100).toFixed(1) + '%');
-    print('  n_min for ±20% MOE:  ' + s_nmin);
-    print('  Allocated n = ' + N_SOIL_SAMPLES + '  →  expected MOE = ±' +
+    print('  n_min for ±20% MOE (SRS):  ' + s_nmin);
+    print('  Configured n = ' + N_SOIL_SAMPLES + '  →  expected MOE = ±' +
           (100*t90*s_cv/Math.sqrt(N_SOIL_SAMPLES)).toFixed(1) + '%' +
           ((100*t90*s_cv/Math.sqrt(N_SOIL_SAMPLES)) <= 20 ? '  ✓' : '  ⚠'));
+    print('  RECOMMENDATION: ' + (N_SOIL_SAMPLES >= s_nmin
+          ? 'configured n meets the ±20% target.'
+          : 'increase N_SOIL_SAMPLES to ≥ ' + s_nmin + ' to meet ±20% (SRS bound).'));
+    print('');
+    print('  CAVEAT: n_min uses the map\'s pixel-to-pixel spatial SD as a proxy');
+    print('  for field-plot variance and assumes simple random sampling. Neyman');
+    print('  stratification typically beats this bound, so these n are');
+    print('  conservative. Field data will give the definitive MOE.');
     print('═════════════════════════════════════════════════════════════════');
 
     var features = [];
@@ -1456,7 +1608,7 @@ function _powerAnalysis() {
 //   Weighted means used as primary estimates; equal-weight retained
 //   for comparison.
 // ─────────────────────────────────────────────────────────────────
-function step9_reportsAndExports() {
+function step9_reportsAndExports(onDone) {
   if (!forest_wmean)       { setStatus('Run Step 7 first.'); return; }
   if (!soil_wmean)         { setStatus('Run Step 7 first.'); return; }
   if (!total_ecosystem_c_w){ setStatus('Run Step 7 first.'); return; }
@@ -1547,10 +1699,11 @@ function step9_reportsAndExports() {
     });
 
   // ── Summary table (FeatureCollection → CSV export) ────────────
-  var makeRow = function(source, desc, sigma_type, sigma_val, pool, res, st) {
+  var makeRow = function(source, desc, sigma_type, sigma_val, pool, res, st, scope) {
     return ee.Feature(null, {
       '1_source':      source,
       '2_description': desc,
+      '2_carbon_scope': scope || 'AGB+BGB carbon',
       '3_sigma_type':  sigma_type,
       '3_sigma_mean':  sigma_val,
       '4_mean_kgm2':   st.mean,
@@ -1567,41 +1720,41 @@ function step9_reportsAndExports() {
 
   var tableRows = [
     // Forest
-    makeRow('GEDI RF (this study)', 'Pilot→final 2-stage RF on GEDI L4A AGBD; 3-fold CV σ',
-      '3-fold CV RMSE × 0.1', gedi_rf_sigma_ee, 'Forest Carbon', EXPORT_SCALE,
-      getStats(forest_rf_pred, 'forest_carbon_kgm2', EXPORT_SCALE)),
+    makeRow('GEDI RF (this study)', 'Pilot→final 2-stage RF on GEDI L4A AGBD; AGB×' + AGB_TO_C_KGM2.toFixed(3) + '; 3-fold CV σ',
+      '3-fold CV RMSE × ' + AGB_TO_C_KGM2.toFixed(3), gedi_rf_sigma_ee, 'Forest Carbon', EXPORT_SCALE,
+      getStats(forest_rf_pred, 'forest_carbon_kgm2', EXPORT_SCALE), 'AGB+BGB carbon (from AGBD)'),
     makeRow('Sothe et al. FC', 'McMaster/WWF-Canada national FC map (kg/m2)',
       'Per-pixel product unc', getStats(sothe_fc_unc,'sothe_fc_unc',250).mean, 'Forest Carbon', 250,
-      getStats(sothe_fc, 'sothe_fc', 250)),
-    makeRow('SCANFI v1.2 FC', 'AGB × 0.05 → kg C/m². Guindon 2024 RMSE 38.70 t/ha',
+      getStats(sothe_fc, 'sothe_fc', 250), 'AGB+BGB+dead carbon (native)'),
+    makeRow('SCANFI v1.2 FC', 'AGB × ' + AGB_TO_C_KGM2.toFixed(3) + ' → kg C/m². Guindon 2024 RMSE 38.70 t/ha',
       'Constant (published RMSE)', scanfi_sigma_ee, 'Forest Carbon', 25,
-      getStats(scanfi_fc, 'scanfi_fc', EXPORT_SCALE)),
+      getStats(scanfi_fc, 'scanfi_fc', EXPORT_SCALE), 'AGB+BGB carbon (from AGB)'),
     makeRow('Forest Weighted Mean (this study)',
       'Inv-var weighted: GEDI RF + Sothe FC + SCANFI. w_i = 1/σ_i²',
       'Inv-var combined σ', getStats(forest_wmean_sigma,'forest_wmean_sigma',EXPORT_SCALE).mean,
-      'Forest Carbon', EXPORT_SCALE, getStats(forest_wmean, 'forest_wmean', EXPORT_SCALE)),
-    makeRow('Forest Equal-weight Mean [comparison]', 'GEDI RF + Sothe FC + SBFI, equal weights',
+      'Forest Carbon', EXPORT_SCALE, getStats(forest_wmean, 'forest_wmean', EXPORT_SCALE), 'AGB+BGB carbon'),
+    makeRow('Forest Equal-weight Mean [comparison]', 'GEDI RF + Sothe FC + SCANFI, equal weights',
       'Ensemble SD', getStats(forest_ens_sd,'forest_ens_sd',EXPORT_SCALE).mean,
-      'Forest Carbon [comparison]', EXPORT_SCALE, getStats(forest_ens_mean,'forest_ens_mean',EXPORT_SCALE)),
+      'Forest Carbon [comparison]', EXPORT_SCALE, getStats(forest_ens_mean,'forest_ens_mean',EXPORT_SCALE), 'AGB+BGB carbon'),
     // Soil
     makeRow('Sothe et al. SC', 'McMaster/WWF-Canada national SC map (kg/m2)',
       'Per-pixel product unc', getStats(sothe_sc_unc,'sothe_sc_unc',250).mean, 'Soil Carbon', 250,
-      getStats(sothe_sc, 'sothe_sc', 250)),
+      getStats(sothe_sc, 'sothe_sc', 250), 'Soil organic carbon 0-1 m'),
     makeRow('SoilGrids OCS 0-100 cm', 'Depth-integrated OCS from SoilGrids v2.0 (kg/m2)',
       'Derived (std Sothe unc + inter-product SD)',
       getStats(sg_sigma,'sg_sigma',250).mean, 'Soil Carbon', 250,
-      getStats(sg_soc_1m, 'sg_soc_1m', 250)),
+      getStats(sg_soc_1m, 'sg_soc_1m', 250), 'Soil organic carbon 0-1 m'),
     makeRow('Soil Weighted Mean (this study)',
       'Inv-var weighted: Sothe SC + SoilGrids. SoilGrids σ derived.',
       'Inv-var combined σ', getStats(soil_wmean_sigma,'soil_wmean_sigma',250).mean,
-      'Soil Carbon', 250, getStats(soil_wmean, 'soil_wmean', 250)),
+      'Soil Carbon', 250, getStats(soil_wmean, 'soil_wmean', 250), 'Soil organic carbon 0-1 m'),
     makeRow('Soil Equal-weight Mean [comparison]', 'Sothe SC + SoilGrids, equal weights',
       'Ensemble SD (inter-product disagree)', getStats(soil_ens_sd,'soil_ens_sd',250).mean,
-      'Soil Carbon [comparison]', 250, getStats(soil_ens_mean,'soil_ens_mean',250)),
+      'Soil Carbon [comparison]', 250, getStats(soil_ens_mean,'soil_ens_mean',250), 'Soil organic carbon 0-1 m'),
     // Total
     makeRow('Total Ecosystem Carbon — Weighted', 'Forest Weighted Mean + Soil Weighted Mean',
       'Propagated inv-var', null, 'Total Ecosystem', EXPORT_SCALE,
-      getStats(total_ecosystem_c_w, 'total_ec_weighted', EXPORT_SCALE))
+      getStats(total_ecosystem_c_w, 'total_ec_weighted', EXPORT_SCALE), 'Forest + soil carbon')
   ];
 
   var summaryTable = ee.FeatureCollection(tableRows.filter(function(r){return r!==null;}));
@@ -1645,7 +1798,7 @@ function step9_reportsAndExports() {
   exportRaster(dsm_soil,            'Soil_Data_Source_Map');
 
   // Tables
-  Export.table.toDrive({ collection: summaryTable, description: 'Carbon_Summary_Table_v4_5',
+  Export.table.toDrive({ collection: summaryTable, description: 'Carbon_Summary_Table_v4_6',
     folder: EXPORT_FOLDER, fileFormat: 'CSV' });
 
   if (forest_sampling_pts) {
@@ -1664,20 +1817,104 @@ function step9_reportsAndExports() {
 
   markDone(8);
   setStatus('Step 9 complete - check Tasks panel to run all exports.');
+  if (typeof onDone === 'function') onDone();
+}
+
+
+// ─────────────────────────────────────────────────────────────────
+// SECTION G — PARTNER ORCHESTRATION (asset preflight + Run All)
+// ─────────────────────────────────────────────────────────────────
+
+// [0] Verify that every asset the pipeline reads is accessible to this
+// account BEFORE running anything, so a partner gets a clear, early
+// diagnosis instead of a mid-run permission error.
+function checkAssetAccess() {
+  setStatus('[0] Checking Earth Engine asset access...');
+  print('');
+  print('══ ASSET ACCESS PREFLIGHT ════════════════════════════════════════');
+  print('  FAIL on a REQUIRED asset → ask the owner to share it with your');
+  print('  account, or replace the ID in SECTION A with one you can read.');
+  print('  (Public datasets — GEDI, SoilGrids, SCANFI, sat-io — are not');
+  print('  re-checked here; only project-private assets are listed.)');
+  print('');
+
+  var checks = [
+    { id: AOI_ASSET,          type: 'table', required: true,  label: 'AOI boundary' },
+    { id: SOTHE_FC_UNC_ASSET, type: 'image', required: true,  label: 'Sothe FC uncertainty' },
+    { id: SOTHE_SC_UNC_ASSET, type: 'image', required: true,  label: 'Sothe SC uncertainty' },
+    { id: WOSIS_ASSET,        type: 'table', required: false, label: 'WOSIS field data (Step 1 only)' },
+    { id: CANPEAT_ASSET,      type: 'table', required: false, label: 'CanPeat field data (Step 1 only)' },
+    { id: COMBINED_ASSET,     type: 'table', required: false, label: 'Combined profiles (Step 4b only)' }
+  ];
+
+  var remaining = checks.length, reqFail = 0;
+  var finalize = function() {
+    remaining -= 1;
+    if (remaining > 0) return;
+    print('');
+    if (reqFail === 0) {
+      print('  ✓ All REQUIRED assets readable — safe to run the pipeline.');
+      setStatus('[0] Access OK — click [▶ RUN ALL] or Step [2].');
+    } else {
+      print('  ✗ ' + reqFail + ' REQUIRED asset(s) NOT readable — fix sharing first.');
+      setStatus('[0] ' + reqFail + ' required asset(s) inaccessible — see console.');
+    }
+    print('══════════════════════════════════════════════════════════════════');
+  };
+
+  checks.forEach(function(c) {
+    var probe = (c.type === 'image')
+      ? ee.Image(c.id).bandNames()
+      : ee.FeatureCollection(c.id).limit(0).size();
+    probe.evaluate(function(res, err) {
+      var ok = !err && res !== null && res !== undefined;
+      print('  [' + (ok ? '✓ PASS' : '✗ FAIL') + '] ' +
+            (c.required ? 'REQUIRED ' : 'optional ') + c.label);
+      print('        ' + c.id + (err ? '\n        → ' + err : ''));
+      if (!ok && c.required) reqFail += 1;
+      finalize();
+    });
+  });
+}
+
+// [▶ RUN ALL] Chain Steps 2→9. Each step calls the next from its own
+// completion callback (set up via the onDone parameter), so the async
+// GEDI training / 3-fold CV / soil ensemble all finish before the next
+// step starts. Step 1 (field data) and [4b] snapshot are optional and
+// are intentionally NOT run here.
+function runAll() {
+  setStatus('▶ RUN ALL: starting Steps 2 → 9...');
+  print('');
+  print('▶ RUN ALL — executing Steps 2 through 9 in sequence. This can take');
+  print('  several minutes; watch the PROGRESS panel. When it finishes, open');
+  print('  the Tasks tab (top-right) to run the exports.');
+  step2_importRasterPriors(function() {
+  step3_importGEDI(function() {
+  step4_buildCovariates(function() {
+  step5_trainFinalGEDI(function() {
+  step6_buildSoilModel(function() {
+  step7_buildEnsemble(function() {
+  step8_generateSampling(function() {
+  step9_reportsAndExports(function() {
+    setStatus('▶ RUN ALL complete — open the Tasks tab to run exports.');
+    print('▶ RUN ALL complete. Open the Tasks tab (top-right) to run exports.');
+  }); }); }); }); }); }); }); });
 }
 
 
 // ─────────────────────────────────────────────────────────────────
 // BOOT
 // ─────────────────────────────────────────────────────────────────
-print("=== Charlie's Place KBA - Forest Carbon Assessment v4.5 ===");
+print("=== Charlie's Place KBA - Forest Carbon Assessment v4.6 ===");
 print('CRS: ' + EXPORT_CRS + ' | Scale: ' + EXPORT_SCALE + ' m');
-print('Forest: ' + N_FOREST_SAMPLES + ' pts | Soil: ' + N_SOIL_SAMPLES + ' pts');
+print('Forest: ' + N_FOREST_SAMPLES + ' pts | Soil: ' + N_SOIL_SAMPLES + ' pts (EXACT)');
+print('Carbon: AGB→C factor = ' + AGB_TO_C_KGM2.toFixed(3) +
+      '  (×(1+' + BGB_RATIO + ') BGB ×' + CARBON_FRACTION + ' C-frac ×' + MGHA_TO_KGM2 + ' unit)');
 print('Ensemble: inverse-variance weighting (w_i = 1/σ_i²) per pool');
-print('Forest σ: GEDI RF = 3-fold CV | Sothe FC = per-pixel | SCANFI = ' + SCANFI_SIGMA_FC + ' kg/m²');
+print('Forest σ: GEDI RF = 3-fold CV | Sothe FC = per-pixel | SCANFI = ' + SCANFI_SIGMA_FC.toFixed(3) + ' kg/m²');
 print('Soil   σ: Sothe SC = per-pixel | SoilGrids = standardized(Sothe unc + inter-product SD)');
-print('Sampling: Neyman | LC: ESA WorldCover v200 × ' + N_UNC_BINS + ' unc bins');
-print('Run steps [1] to [9] in sequence using the panel buttons.');
+print('Sampling: Neyman (largest-remainder, exact n) | LC: ESA WorldCover v200 × ' + N_UNC_BINS + ' unc bins');
+print('Partner flow: [0] Check Asset Access → [▶ RUN ALL] → Tasks tab → run exports.');
 
 try { initUI(); } catch(e) {
   print('Panel already rendered - hard refresh (Ctrl+Shift+R) to fully reset.');
