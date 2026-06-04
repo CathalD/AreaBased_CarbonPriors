@@ -138,7 +138,7 @@ var MIN_GEDI_POINTS   = 50;
 var GEDI_SAMPLE_SCALE = 100;
 var GEDI_NUM_PIXELS   = 3000;
 
-var N_UNC_BINS          = 4;
+var N_UNC_BINS          = 3;   // uncertainty bins per LC class (v4.6: 4→3 for wider spread)
 var MIN_PTS_PER_STRATUM = 2;   // advisory floor; exact total (above) always wins (v4.6)
 
 // ── Carbon conversion constants (v4.6) ───────────────────────────
@@ -1381,39 +1381,53 @@ function step8_generateSampling(onDone) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// _neymanSample — Neyman optimal allocation (unchanged from v4.4)
+// _neymanSample — Neyman optimal allocation
+// v4.6: uncertainty binning generalised to any N_UNC_BINS. Break
+// percentiles are i/N for i=1..N-1 (tertiles for N=3, quartiles for
+// N=4, …), so changing N_UNC_BINS in the config "just works".
 // ─────────────────────────────────────────────────────────────────
 function _neymanSample(unc_img, unc_band, lc_img, lc_band, extra_bands, n_total, pool_label, callback) {
   var unc = unc_img.select(unc_band);
 
-  unc.reduceRegion({ reducer: ee.Reducer.percentile([25, 50, 75]),
+  // Break percentiles: i*100/N for i = 1..N-1 (e.g. N=3 → [33,67], N=4 → [25,50,75])
+  var pctVals = [];
+  for (var pi = 1; pi < N_UNC_BINS; pi++) pctVals.push(Math.round(pi * 100 / N_UNC_BINS));
+
+  unc.reduceRegion({ reducer: ee.Reducer.percentile(pctVals),
     geometry: aoi, scale: EXPORT_SCALE, crs: EXPORT_CRS,
     maxPixels: 1e11, bestEffort: true
   }).evaluate(function(pct, pctErr) {
     if (pctErr) { print('ERROR computing percentiles (' + pool_label + '): ' + pctErr); return; }
 
-    var p25 = pct[unc_band + '_p25'] || 1;
-    var p50 = pct[unc_band + '_p50'] || 3;
-    var p75 = pct[unc_band + '_p75'] || 6;
+    // Break values (ascending); fall back to evenly-spaced defaults if any is null
+    var bks = pctVals.map(function(p, idx) {
+      var v = pct[unc_band + '_p' + p];
+      return (v === undefined || v === null) ? (idx + 1) * 2 : v;
+    });
 
-    print(pool_label + ' uncertainty quartile breaks:');
-    print('  p25=' + p25.toFixed(4) + ' | p50=' + p50.toFixed(4) + ' | p75=' + p75.toFixed(4));
+    print(pool_label + ' uncertainty breaks (' + N_UNC_BINS + ' bins):');
+    print('  ' + pctVals.map(function(p, idx) {
+      return 'p' + p + '=' + bks[idx].toFixed(4);
+    }).join(' | '));
 
-    var binSigmas = [p25/2, (p25+p50)/2, (p50+p75)/2, p75*1.5];
+    // Per-bin representative σ_h: bin 0 = bks0/2; interior = midpoint of its
+    // bounding breaks; top bin = highest break × 1.5
+    var binSigmas = [bks[0] / 2];
+    for (var bi = 1; bi < N_UNC_BINS - 1; bi++) binSigmas.push((bks[bi - 1] + bks[bi]) / 2);
+    binSigmas.push(bks[N_UNC_BINS - 2] * 1.5);
     print('  Bin σ_h midpoints: [' + binSigmas.map(function(v){ return v.toFixed(4); }).join(', ') + ']');
 
+    // Bin index = number of breaks the value meets/exceeds → 0..N-1
     var unc_unm = unc.unmask(0);
-    var unc_bin = ee.Image(N_UNC_BINS - 1)
-      .where(unc_unm.lt(p75), N_UNC_BINS - 2)
-      .where(unc_unm.lt(p50), N_UNC_BINS - 3)
-      .where(unc_unm.lt(p25), 0)
-      .toInt().rename('unc_bin');
+    var unc_bin = ee.Image(0);
+    for (var bk = 0; bk < bks.length; bk++) unc_bin = unc_bin.add(unc_unm.gte(bks[bk]));
+    unc_bin = unc_bin.toInt().rename('unc_bin');
 
     var stratum = lc_img.select(lc_band).multiply(N_UNC_BINS).add(unc_bin).toInt().rename('stratum');
 
     Map.addLayer(unc_bin.updateMask(lc_img.select(lc_band).mask()),
       { min: 0, max: N_UNC_BINS-1, palette: ['#2c7bb6','#abd9e9','#fdae61','#d7191c'] },
-      pool_label + ' Uncertainty Bins (0=low 3=high)', false);
+      pool_label + ' Uncertainty Bins (0=low → ' + (N_UNC_BINS-1) + '=high)', false);
     Map.addLayer(stratum,
       { min: N_UNC_BINS, max: 5*N_UNC_BINS + N_UNC_BINS - 1,
         palette: ['#d4e6f1','#85c1e9','#2e86c1','#1a5276',

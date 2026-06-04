@@ -40,8 +40,10 @@ Charlie's Place KBA, defined by the boundary asset
 buffers the AOI by 50 km for sampling remote-sensing predictors, then clips all
 outputs to the boundary.
 
-- AOI area: `[RESULT: __ ha]`
-- Dominant land cover (ESA WorldCover): `[RESULT: forest / wetland / … breakdown]`
+- AOI area: `[RESULT: pending — see "TOTAL CARBON STOCKS" Console block]`
+- Dominant land cover (ESA WorldCover): predominantly **forest**, with minor
+  shrub/grassland; negligible mapped wetland/cropland within the AOI (the Neyman
+  strata that received area were almost entirely the forest and shrub/grass classes).
 
 ---
 
@@ -127,8 +129,12 @@ uncertainty (converted to carbon σ with `AGB_TO_C_KGM2`). This σ measures how 
 the RF reproduces held-out GEDI values — it is *model* error given GEDI as truth,
 not the absolute error in the true carbon stock.
 
-- 3-fold CV RMSE: `[RESULT: __ Mg/ha AGBD]` → σ = `[RESULT: __ kg C/m²]`
-- Top covariates retained: `[RESULT: list]`
+- GEDI L4A training footprints: 110 (109 complete cases); AGBD mean 35.4 Mg/ha,
+  SD 26.1 Mg/ha.
+- 3-fold CV RMSE: **22.26 Mg/ha AGBD** (folds 27.70 / 18.04 / 21.02) → σ =
+  **1.358 kg C/m²**.
+- Top 6 covariates retained: **B3, NBR, B12, B11, B2, SAR ascending-summer VH**
+  (Sentinel-2 green/SWIR/NIR and SAR dominate).
 
 ### 4.3 Soil carbon
 
@@ -168,14 +174,20 @@ The pipeline produces difference layers (Sothe − SoilGrids for soil; Sothe −
 and weighted − equal-weight for forest), a forest data-source map (number of
 products present, 1–3), and a soil data-source map. Summary agreement:
 
-- Forest Sothe − SCANFI mean difference: `[RESULT: __ kg C/m²]`
-- Soil Sothe − SoilGrids mean difference: `[RESULT: __ kg C/m²]`
-- Weighted − equal-weight (forest / soil): `[RESULT: __ / __ kg C/m²]`
+- Forest Sothe − SCANFI mean difference: **+1.51 kg C/m²** (range −7.9 to +13.3);
+  Sothe FC reads higher than SCANFI on average.
+- Soil Sothe − SoilGrids mean difference: **+9.17 kg C/m²** (range −36.7 to +84.4);
+  Sothe SC reads substantially higher than SoilGrids, with large local disagreement.
+- Weighted − equal-weight: forest **−0.98 kg C/m²**, soil **+0.28 kg C/m²**. The
+  forest weighted mean sits well below the equal-weight mean because GEDI RF (lowest
+  σ → highest weight) pulls the estimate down (see §8, GEDI weighting caveat).
 
 ### 4.6 Sampling design (Neyman allocation)
 
 Strata = **ESA WorldCover broad class** (forest / shrub-grass / wetland / cropland /
-other) × **uncertainty quartile bin** (4 bins from the RSS uncertainty percentiles).
+other) × **uncertainty tertile bin** (`N_UNC_BINS = 3`, breaks at the 33rd/67th RSS
+uncertainty percentiles; reduced from 4 to give wider spatial spread on small budgets).
+The binning generalises to any `N_UNC_BINS`.
 Neyman optimal allocation assigns more samples to strata that are both **large** and
 **uncertain** (weight `N_h × σ_h`).
 
@@ -190,10 +202,12 @@ for a ±20% margin of error at 90% confidence, the expected MOE at the configure
 and an explicit recommendation. It is an SRS bound (uses map spatial SD as a proxy
 for plot variance), so Neyman stratification should do at least this well.
 
-- Forest: CV = `[RESULT: __%]`, n_min(±20%) = `[RESULT: __]`, configured n = 10 →
-  expected MOE `[RESULT: ±__%]` → `[RESULT: meets / does not meet target]`
-- Soil: CV = `[RESULT: __%]`, n_min(±20%) = `[RESULT: __]`, configured n = 12 →
-  expected MOE `[RESULT: ±__%]` → `[RESULT: meets / does not meet target]`
+- Forest: μ = 3.575 kg/m², σ = 1.024, **CV = 28.6%**, **n_min(±20%) = 6**,
+  configured n = 10 → expected MOE **±14.9%** → ✓ **meets the target**.
+- Soil: μ = 38.277 kg/m², σ = 16.414, **CV = 42.9%**, **n_min(±20%) = 13**,
+  configured n = 12 → expected MOE **±20.4%** → ⚠ **just misses** the ±20% SRS bound.
+  **Recommendation: set `N_SOIL_SAMPLES = 13`** (Neyman stratification typically
+  beats the SRS bound, so 12 may suffice in practice, but 13 guarantees ±20%).
 
 ---
 
@@ -203,32 +217,50 @@ for plot variance), so Neyman stratification should do at least this well.
 
 | Pool | Mean density (Mg C/ha) | Mean density (kg C/m²) | Total stock (t C) |
 |---|---|---|---|
-| Forest (forested pixels) | `[RESULT: __]` | `[RESULT: __]` | `[RESULT: __]` |
-| Soil (full AOI, 0–1 m) | `[RESULT: __]` | `[RESULT: __]` | `[RESULT: __]` |
-| **Total ecosystem** | `[RESULT: __]` | `[RESULT: __]` | `[RESULT: __]` |
+| Forest (≥2 members, AOI) | 33.9 | 3.386 | `[RESULT: pending — area]` |
+| Soil (0–1 m) | 382.8 | 38.277 | `[RESULT: pending — area]` |
+| **Total ecosystem** | **417.7** | **41.765** | `[RESULT: pending — area]` |
 
-> Total stock = mean density × AOI area. This is a **prior** from remote sensing;
-> field sampling will produce the calibrated stock with a defensible CI.
+> Forested-pixels-only forest mean (used for power analysis / stock) is slightly
+> higher at **3.575 kg/m² (35.8 Mg C/ha)**. Total stock = mean density × AOI area;
+> the "TOTAL CARBON STOCKS — WEIGHTED ENSEMBLE" Console block (AOI area + forest /
+> soil / total t C) was not captured in the test run — paste it and these three
+> cells fill in. This is a **prior** from remote sensing; field sampling will
+> produce the calibrated stock with a defensible CI.
 
 ### 5.2 Per-product comparison (within AOI)
 
 | Source | Pool | Scope | σ type | σ mean (kg/m²) | Mean (kg/m²) | SD (kg/m²) |
 |---|---|---|---|---|---|---|
-| GEDI RF (this study) | Forest | AGB+BGB carbon | 3-fold CV | `[RESULT]` | `[RESULT]` | `[RESULT]` |
-| Sothe et al. FC | Forest | AGB+BGB+dead | per-pixel | `[RESULT]` | `[RESULT]` | `[RESULT]` |
-| SCANFI v1.2 FC | Forest | AGB+BGB carbon | constant | `[RESULT]` | `[RESULT]` | `[RESULT]` |
-| **Forest weighted mean** | Forest | AGB+BGB carbon | inv-var | `[RESULT]` | `[RESULT]` | `[RESULT]` |
-| Sothe et al. SC | Soil | SOC 0–1 m | per-pixel | `[RESULT]` | `[RESULT]` | `[RESULT]` |
-| SoilGrids OCS | Soil | SOC 0–1 m | derived | `[RESULT]` | `[RESULT]` | `[RESULT]` |
-| **Soil weighted mean** | Soil | SOC 0–1 m | inv-var | `[RESULT]` | `[RESULT]` | `[RESULT]` |
+| GEDI RF (this study) | Forest | AGB+BGB carbon | 3-fold CV | 1.358 | 3.094 | 1.137 |
+| Sothe et al. FC | Forest | AGB+BGB+dead | per-pixel | 4.721 | 5.981 | 2.345 |
+| SCANFI v1.2 FC | Forest | AGB+BGB carbon | constant | 2.361 | 4.406 | 1.489 |
+| Forest equal-weight mean | Forest | AGB+BGB carbon | ensemble SD | — | 4.363 | 1.202 |
+| **Forest weighted mean** | Forest | AGB+BGB carbon | inv-var | 1.143 | **3.386** | 0.834 |
+| Sothe et al. SC | Soil | SOC 0–1 m | per-pixel | 35.717 | 42.953 | 27.394 |
+| SoilGrids OCS | Soil | SOC 0–1 m | derived | 35.116 | 33.860 | 7.977 |
+| Soil equal-weight mean | Soil | SOC 0–1 m | inter-product SD | 10.499 | 37.995 | 14.810 |
+| **Soil weighted mean** | Soil | SOC 0–1 m | inv-var | 24.241 | **38.277** | 16.414 |
 
 *(This table is exported verbatim as `Carbon_Summary_Table_v4_6.csv`.)*
 
 ### 5.3 Sample allocation
 
-- Forest: total allocated = **10** (exact). Per-stratum: `[RESULT: table]`
-- Soil: total allocated = **12** (exact). Per-stratum: `[RESULT: table]`
-- Flags: `[RESULT: any zero/below-floor strata notes]`
+> **Allocation tables pending a 3-bin re-run.** The design was changed from 4 to 3
+> uncertainty bins after the initial test (for wider spread on the small budgets).
+> The allocation depends on the bin count, so re-run `[▶ RUN ALL]` and paste the two
+> "NEYMAN ALLOCATION" Console blocks to populate the tables below. (Carbon densities,
+> per-product stats, CV RMSE, and the power analysis in §4–§5.2 are independent of
+> bin count and remain valid.)
+>
+> For reference, the **4-bin** test run allocated — Forest (Σ N_hσ_h = 627,346):
+> forest bins 0–3 → 1/2/2/4 pts + shrub-grass low → 1 = **10**. Soil (Σ = 5,046,774):
+> forest bins 0–3 → 1/1/3/6 + shrub-grass high → 1 = **12**. Both exact; allocation
+> concentrated in the high-uncertainty forest strata.
+
+- Forest: total allocated = **10** (exact). Per-stratum (3 bins): `[RESULT: paste table]`
+- Soil: total allocated = **12** (exact). Per-stratum (3 bins): `[RESULT: paste table]`
+- Flags (zero / below-floor strata): `[RESULT: paste Console NOTE lines]`
 
 ---
 
@@ -290,8 +322,18 @@ needed for the carbon maps or sampling design.)*
 - **BGB approximation.** A single national ratio (0.22) is used for GEDI/SCANFI;
   Sothe used type-specific ratios and also includes dead-plant carbon — a declared,
   modest scope difference.
-- **GEDI RF σ is model error, not stock error.** It reflects RF skill against GEDI,
-  which itself has footprint-level error; field data provide the ground truth.
+- **GEDI weighting caveat (material in this AOI).** The GEDI RF σ (3-fold CV RMSE,
+  1.358 kg/m²) captures only RF *model* error against GEDI — it excludes GEDI's own
+  footprint-level error. Because it is the smallest of the three forest σ values
+  (vs SCANFI 2.361 and Sothe 4.721), GEDI RF receives the largest inverse-variance
+  weight and **pulls the forest weighted mean (3.39 kg/m²) down toward GEDI's own
+  estimate (3.09)** and well below Sothe (5.98). If GEDI's intrinsic uncertainty
+  were added to its σ, the weighted mean would shift upward. Field plots will
+  resolve which prior is closest. Treat the forest weighted mean as GEDI-leaning.
+- **Small forest training set.** Only 110 GEDI L4A footprints fell in the AOI buffer;
+  the RF is correspondingly data-limited (CV RMSE ≈ 63% of mean AGBD).
+- **Optional asset missing.** `…/combined_profiles` was not found at run time; this
+  affects only the Step 4b covariate-extraction CSV, not the carbon maps or sampling.
 - **SoilGrids σ is derived**, not a published per-pixel product — treat as indicative.
 - **RSS uncertainty (stratification signal)** mixes an absolute SD with a relative
   GEDI term; it is used only to *rank* pixels for stratification, not as the reported
