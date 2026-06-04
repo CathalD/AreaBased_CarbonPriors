@@ -4,9 +4,10 @@
 **Area of interest (AOI):** Charlie's Place Key Biodiversity Area (KBA), Canada
 **Projection / scale:** EPSG:32621 (UTM Zone 21N) · forest 25 m, soil 250 m native
 
-> **Note on numbers.** Results in this report are marked `[RESULT: …]`. These are
-> filled in from a single end-to-end run of `GEE_Script.js` (`[▶ RUN ALL]` → read
-> the Console). Until then they are placeholders. Methods, design, and QA are final.
+> **Note on numbers.** All figures below are from a full end-to-end run of
+> `GEE_Script.js` v4.6 (`[▶ RUN ALL]`, `N_UNC_BINS = 3`, forest n = 10, soil n = 12)
+> over the Charlie's Place KBA AOI. AOI-mean stats use Earth Engine `bestEffort`
+> reductions and may vary ~±0.2 kg/m² between runs (see §8); exports are deterministic.
 
 ---
 
@@ -40,7 +41,7 @@ Charlie's Place KBA, defined by the boundary asset
 buffers the AOI by 50 km for sampling remote-sensing predictors, then clips all
 outputs to the boundary.
 
-- AOI area: `[RESULT: pending — see "TOTAL CARBON STOCKS" Console block]`
+- AOI area: **8,438.8 ha**
 - Dominant land cover (ESA WorldCover): predominantly **forest**, with minor
   shrub/grassland; negligible mapped wetland/cropland within the AOI (the Neyman
   strata that received area were almost entirely the forest and shrub/grass classes).
@@ -202,8 +203,8 @@ for a ±20% margin of error at 90% confidence, the expected MOE at the configure
 and an explicit recommendation. It is an SRS bound (uses map spatial SD as a proxy
 for plot variance), so Neyman stratification should do at least this well.
 
-- Forest: μ = 3.575 kg/m², σ = 1.024, **CV = 28.6%**, **n_min(±20%) = 6**,
-  configured n = 10 → expected MOE **±14.9%** → ✓ **meets the target**.
+- Forest: μ = 3.386 kg/m², σ = 0.834, **CV = 24.6%**, **n_min(±20%) = 5**,
+  configured n = 10 → expected MOE **±12.8%** → ✓ **comfortably meets the target**.
 - Soil: μ = 38.277 kg/m², σ = 16.414, **CV = 42.9%**, **n_min(±20%) = 13**,
   configured n = 12 → expected MOE **±20.4%** → ⚠ **just misses** the ±20% SRS bound.
   **Recommendation: set `N_SOIL_SAMPLES = 13`** (Neyman stratification typically
@@ -215,24 +216,25 @@ for plot variance), so Neyman stratification should do at least this well.
 
 ### 5.1 Carbon densities and stocks (weighted ensemble)
 
+AOI area = **8,438.8 ha**.
+
 | Pool | Mean density (Mg C/ha) | Mean density (kg C/m²) | Total stock (t C) |
 |---|---|---|---|
-| Forest (≥2 members, AOI) | 33.9 | 3.386 | `[RESULT: pending — area]` |
-| Soil (0–1 m) | 382.8 | 38.277 | `[RESULT: pending — area]` |
-| **Total ecosystem** | **417.7** | **41.765** | `[RESULT: pending — area]` |
+| Forest (forested pixels) | 35.8 | 3.575 | **301,730** |
+| Soil (0–1 m) | 382.8 | 38.277 | **3,230,090** |
+| **Total ecosystem** | **418.5** | **41.852** | **3,531,820** |
 
-> Forested-pixels-only forest mean (used for power analysis / stock) is slightly
-> higher at **3.575 kg/m² (35.8 Mg C/ha)**. Total stock = mean density × AOI area;
-> the "TOTAL CARBON STOCKS — WEIGHTED ENSEMBLE" Console block (AOI area + forest /
-> soil / total t C) was not captured in the test run — paste it and these three
-> cells fill in. This is a **prior** from remote sensing; field sampling will
-> produce the calibrated stock with a defensible CI.
+> Total stock = mean density × AOI area. Soil holds ~91% of the ecosystem carbon
+> prior (~3.23 Mt C of ~3.53 Mt C), consistent with Sothe et al.'s national finding
+> that most Canadian ecosystem carbon is below ground. This is a **prior** from
+> remote sensing; field sampling will produce the calibrated stock with a defensible
+> CI.
 
 ### 5.2 Per-product comparison (within AOI)
 
 | Source | Pool | Scope | σ type | σ mean (kg/m²) | Mean (kg/m²) | SD (kg/m²) |
 |---|---|---|---|---|---|---|
-| GEDI RF (this study) | Forest | AGB+BGB carbon | 3-fold CV | 1.358 | 3.094 | 1.137 |
+| GEDI RF (this study) | Forest | AGB+BGB carbon | 3-fold CV | 1.358 | 2.83–3.09 † | 0.83–1.14 |
 | Sothe et al. FC | Forest | AGB+BGB+dead | per-pixel | 4.721 | 5.981 | 2.345 |
 | SCANFI v1.2 FC | Forest | AGB+BGB carbon | constant | 2.361 | 4.406 | 1.489 |
 | Forest equal-weight mean | Forest | AGB+BGB carbon | ensemble SD | — | 4.363 | 1.202 |
@@ -242,25 +244,45 @@ for plot variance), so Neyman stratification should do at least this well.
 | Soil equal-weight mean | Soil | SOC 0–1 m | inter-product SD | 10.499 | 37.995 | 14.810 |
 | **Soil weighted mean** | Soil | SOC 0–1 m | inv-var | 24.241 | **38.277** | 16.414 |
 
+† AOI-mean statistics from `bestEffort` region reductions vary slightly
+(~±0.2 kg/m²) between runs because Earth Engine pyramids to a coarser scale to
+respect the pixel cap; the underlying maps are deterministic (seed 42). The
+inverse-variance **forest weighted mean is stable at ≈3.39 kg/m²** (AOI) / 3.58
+(forested pixels). For an exact, reduction-independent figure, lower the export
+scale or remove `bestEffort` in `printStats`.
+
 *(This table is exported verbatim as `Carbon_Summary_Table_v4_6.csv`.)*
 
 ### 5.3 Sample allocation
 
-> **Allocation tables pending a 3-bin re-run.** The design was changed from 4 to 3
-> uncertainty bins after the initial test (for wider spread on the small budgets).
-> The allocation depends on the bin count, so re-run `[▶ RUN ALL]` and paste the two
-> "NEYMAN ALLOCATION" Console blocks to populate the tables below. (Carbon densities,
-> per-product stats, CV RMSE, and the power analysis in §4–§5.2 are independent of
-> bin count and remain valid.)
->
-> For reference, the **4-bin** test run allocated — Forest (Σ N_hσ_h = 627,346):
-> forest bins 0–3 → 1/2/2/4 pts + shrub-grass low → 1 = **10**. Soil (Σ = 5,046,774):
-> forest bins 0–3 → 1/1/3/6 + shrub-grass high → 1 = **12**. Both exact; allocation
-> concentrated in the high-uncertainty forest strata.
+Uncertainty breaks (3 bins): forest p33 = 4.33, p67 = 5.20 kg/m²; soil p33 = 21.76,
+p67 = 54.26 kg/m².
 
-- Forest: total allocated = **10** (exact). Per-stratum (3 bins): `[RESULT: paste table]`
-- Soil: total allocated = **12** (exact). Per-stratum (3 bins): `[RESULT: paste table]`
-- Flags (zero / below-floor strata): `[RESULT: paste Console NOTE lines]`
+**Forest — total allocated = 10 (exact).** Σ(N_h × σ_h) ≈ 616,000.
+
+| Stratum | Land cover | Unc bin | N_h (px) | σ_h | n_h |
+|---|---|---|---|---|---|
+| 3 | Forest | 0 (low) | 45,105 | 2.16 | 2 |
+| 4 | Forest | 1 (mid) | 36,063 | 4.77 | 3 |
+| 5 | Forest | 2 (high) | 39,044 | 7.80 | 5 |
+
+**Soil — total allocated = 12 (exact).** Σ(N_h × σ_h) = 5,493,975.
+
+| Stratum | Land cover | Unc bin | N_h (px) | σ_h | n_h |
+|---|---|---|---|---|---|
+| 3 | Forest | 0 (low) | 44,716 | 10.88 | 1 |
+| 4 | Forest | 1 (mid) | 37,169 | 38.01 | 3 |
+| 5 | Forest | 2 (high) | 38,327 | 81.39 | 7 |
+| 8 | Shrub/Grass | 2 (high) | 3,567 | 81.39 | 1 |
+
+**Flags.** Going from 4→3 bins distributed the forest budget across the three
+uncertainty levels (2 / 3 / 5) and reduced the number of zero-point occupied strata
+(forest 8→7, soil 9→7). Allocation still concentrates in forest because the AOI is
+forest-dominated — soil places 11 of 12 points in forest land cover and 1 in
+shrub/grass; forest places all 10 in forest land cover. Two soil strata remain below
+the advisory 2-point floor. For broader land-cover spread, the AOI would need more
+non-forest area or a larger budget; the uncertainty-bin spread is now as even as 12
+points allow.
 
 ---
 
@@ -334,6 +356,12 @@ needed for the carbon maps or sampling design.)*
   the RF is correspondingly data-limited (CV RMSE ≈ 63% of mean AGBD).
 - **Optional asset missing.** `…/combined_profiles` was not found at run time; this
   affects only the Step 4b covariate-extraction CSV, not the carbon maps or sampling.
+- **`bestEffort` reductions.** Reported AOI-mean stats can vary ~±0.2 kg/m² between
+  runs (Earth Engine pyramids to a coarser scale under the pixel cap); maps and
+  exports are deterministic. Lower the scale / drop `bestEffort` for exact figures.
+- **Sampling spread is AOI-limited.** With a forest-dominated AOI and a 10/12 budget,
+  points concentrate in forest land cover regardless of binning; the design spreads
+  them across uncertainty levels rather than land-cover classes.
 - **SoilGrids σ is derived**, not a published per-pixel product — treat as indicative.
 - **RSS uncertainty (stratification signal)** mixes an absolute SD with a relative
   GEDI term; it is used only to *rank* pixels for stratification, not as the reported
@@ -358,6 +386,6 @@ needed for the carbon maps or sampling design.)*
 
 ---
 
-*Pipeline source: `GEE_Script.js` (v4.6). This report documents the method; run the
-script once and replace each `[RESULT: …]` marker with the corresponding Console
-output / exported table value.*
+*Pipeline source: `GEE_Script.js` (v4.6). Results populated from the v4.6 / 3-bin run.
+To refresh after any config change, re-run `[▶ RUN ALL]` and update §5 from the
+Console (model-performance, total-stocks, and Neyman-allocation blocks).*
