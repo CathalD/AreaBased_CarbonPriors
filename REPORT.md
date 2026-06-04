@@ -185,7 +185,9 @@ products present, 1–3), and a soil data-source map. Summary agreement:
 ### 4.6 Sampling design (Neyman allocation)
 
 Strata = **ESA WorldCover broad class** (forest / shrub-grass / wetland / cropland /
-other) × **uncertainty quartile bin** (4 bins from the RSS uncertainty percentiles).
+other) × **uncertainty tertile bin** (`N_UNC_BINS = 3`, breaks at the 33rd/67th RSS
+uncertainty percentiles; reduced from 4 to give wider spatial spread on small budgets).
+The binning generalises to any `N_UNC_BINS`.
 Neyman optimal allocation assigns more samples to strata that are both **large** and
 **uncertain** (weight `N_h × σ_h`).
 
@@ -244,31 +246,21 @@ for plot variance), so Neyman stratification should do at least this well.
 
 ### 5.3 Sample allocation
 
-**Forest — total allocated = 10 (exact).** Σ(N_h × σ_h) = 627,346.
+> **Allocation tables pending a 3-bin re-run.** The design was changed from 4 to 3
+> uncertainty bins after the initial test (for wider spread on the small budgets).
+> The allocation depends on the bin count, so re-run `[▶ RUN ALL]` and paste the two
+> "NEYMAN ALLOCATION" Console blocks to populate the tables below. (Carbon densities,
+> per-product stats, CV RMSE, and the power analysis in §4–§5.2 are independent of
+> bin count and remain valid.)
+>
+> For reference, the **4-bin** test run allocated — Forest (Σ N_hσ_h = 627,346):
+> forest bins 0–3 → 1/2/2/4 pts + shrub-grass low → 1 = **10**. Soil (Σ = 5,046,774):
+> forest bins 0–3 → 1/1/3/6 + shrub-grass high → 1 = **12**. Both exact; allocation
+> concentrated in the high-uncertainty forest strata.
 
-| Stratum | Land cover | Unc bin | N_h (px) | σ_h | n_h |
-|---|---|---|---|---|---|
-| 4 | Forest | 0 (low) | 36,204 | 2.09 | 1 |
-| 5 | Forest | 1 | 26,983 | 4.44 | 2 |
-| 6 | Forest | 2 | 27,279 | 5.14 | 2 |
-| 7 | Forest | 3 (high) | 29,745 | 8.37 | 4 |
-| 8 | Shrub/Grass | 0 (low) | 7,736 | 2.09 | 1 |
-
-**Soil — total allocated = 12 (exact).** Σ(N_h × σ_h) = 5,046,774.
-
-| Stratum | Land cover | Unc bin | N_h (px) | σ_h | n_h |
-|---|---|---|---|---|---|
-| 4 | Forest | 0 (low) | 34,610 | 10.63 | 1 |
-| 5 | Forest | 1 | 27,429 | 22.01 | 1 |
-| 6 | Forest | 2 | 29,750 | 40.03 | 3 |
-| 7 | Forest | 3 (high) | 28,423 | 85.96 | 6 |
-| 11 | Shrub/Grass | 3 (high) | 2,613 | 85.96 | 1 |
-
-**Flags.** Allocation concentrates on the high-uncertainty forest strata (as
-intended). Because the AOI is overwhelmingly forest and the sample budgets are
-small, several occupied strata receive 0 points (8 forest, 9 soil) and a few fall
-below the advisory 2-point floor. To spread coverage more evenly, raise N or reduce
-`N_UNC_BINS` (e.g. 3 bins).
+- Forest: total allocated = **10** (exact). Per-stratum (3 bins): `[RESULT: paste table]`
+- Soil: total allocated = **12** (exact). Per-stratum (3 bins): `[RESULT: paste table]`
+- Flags (zero / below-floor strata): `[RESULT: paste Console NOTE lines]`
 
 ---
 
