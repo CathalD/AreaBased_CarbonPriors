@@ -42,6 +42,12 @@
 //     Strata are Forest (ESA tree cover) + Wetland (GWL_FCS30, which
 //     OVERRIDES forest where they overlap); shrub/grass/other are mapped
 //     but NOT sampled. Uncertainty binning generalised to any N_UNC_BINS.
+//     ORDERING — the Soil pool is now allocated/distributed AFTER the
+//     Forest + Wetland strata are built and sampled (previously both pools
+//     ran in parallel and soil sometimes resolved first). PERF — Step 8
+//     strata no longer force a 25 m .reproject() on WorldCover/GWL, and
+//     GWL now uses .filterBounds(aoi).mosaic() (full AOI coverage, no
+//     stray-tile reproject); both were timeout sources on earlier runs.
 //   PACKAGING — [0] asset-access preflight + [▶ RUN ALL] orchestration
 //     so a partner can run end-to-end without ordering steps by hand.
 //
@@ -1337,8 +1343,11 @@ function step8_generateSampling(onDone) {
   // excluded from sampling. Neyman allocation then splits points across the
   // Forest×uncertainty and Wetland×uncertainty strata, proportional to
   // area × uncertainty (N_h × σ_h).
-  var worldcover = ee.ImageCollection('ESA/WorldCover/v200').first()
-    .reproject({ crs: EXPORT_CRS, scale: EXPORT_SCALE }).clip(aoi);
+  // NOTE: no explicit .reproject() — that forces eager full-resolution
+  // resampling of the 10 m WorldCover grid and is a common timeout cause.
+  // The downstream reduceRegion / stratifiedSample calls already pass
+  // scale=EXPORT_SCALE + crs=EXPORT_CRS, so resampling happens lazily there.
+  var worldcover = ee.ImageCollection('ESA/WorldCover/v200').first().clip(aoi);
 
   // Full ESA broad classes — context/display only, not sampled
   var lc_full = worldcover.remap(
@@ -1349,11 +1358,14 @@ function step8_generateSampling(onDone) {
     palette: ['#006837','#addd8e','#41b6c4','#fec44f','#bdbdbd'] },
     'ESA WorldCover Broad LC (context only — not sampled)', false);
 
-  // GWL_FCS30 wetland (most recent year). WETLAND_CODES → wetland; 180
-  // (non-wetland) and 181 (open water) are intentionally excluded.
+  // GWL_FCS30 wetland. WETLAND_CODES → wetland; 180 (non-wetland) and 181
+  // (open water) are intentionally excluded. GWL_FCS30 is a SPATIALLY TILED
+  // global collection, so .filterBounds(aoi).mosaic() is required to get full
+  // AOI coverage — the previous .sort().first() picked a single arbitrary tile
+  // (often not over the AOI) and reprojecting it to 25 m was a timeout risk.
+  // No explicit .reproject(): the reducers below drive scale/crs lazily.
   var gwl = ee.ImageCollection(GWL_FCS30_ASSET)
-    .sort('system:time_start', false).first()
-    .reproject({ crs: EXPORT_CRS, scale: EXPORT_SCALE }).clip(aoi);
+    .filterBounds(aoi).mosaic().clip(aoi);
   var ones = WETLAND_CODES.map(function() { return 1; });
   var wetland_mask = gwl.remap(WETLAND_CODES, ones, 0).gt(0).rename('wetland');
 
@@ -1394,6 +1406,27 @@ function step8_generateSampling(onDone) {
   var forest_unc_masked = forest_uncertainty.updateMask(forest_nf_mask);
   var lc_forest_masked  = lc_broad.updateMask(forest_nf_mask);
 
+  // Soil pool is DEFERRED: it runs only after the Forest + Wetland strata
+  // have been built and sampled. Wetlands carry the most carbon uncertainty,
+  // so the forest/wetland allocation is resolved first and the soil
+  // allocation + point distribution follows it. Serialising the two pools
+  // (instead of firing both in parallel) also halves the peak server load on
+  // the shared strata, which was a likely cause of the earlier timeouts.
+  var runSoilPool = function() {
+    setStatus('Step 8: Forest/Wetland done — allocating Soil pool...');
+    _neymanSample(soil_uncertainty, 'soil_uncertainty_rss', lc_broad, 'lc_class',
+      soilExtras, N_SOIL_SAMPLES, 'Soil',
+      function(pts) {
+        soil_sampling_pts = pts;
+        pts.size().evaluate(function(n) {
+          Map.addLayer(pts, { color: 'e65100' }, 'Soil Sampling Points - Neyman (' + n + ')', true);
+          print('Soil Neyman sampling complete: ' + n + ' points.');
+          _afterPool();
+        });
+      }
+    );
+  };
+
   _neymanSample(forest_unc_masked, 'forest_uncertainty_rss', lc_forest_masked, 'lc_class',
     forestExtras, N_FOREST_SAMPLES, 'Forest',
     function(pts) {
@@ -1402,18 +1435,7 @@ function step8_generateSampling(onDone) {
         Map.addLayer(pts, { color: '1565c0' }, 'Forest Sampling Points - Neyman (' + n + ')', true);
         print('Forest Neyman sampling complete: ' + n + ' points.');
         _afterPool();
-      });
-    }
-  );
-
-  _neymanSample(soil_uncertainty, 'soil_uncertainty_rss', lc_broad, 'lc_class',
-    soilExtras, N_SOIL_SAMPLES, 'Soil',
-    function(pts) {
-      soil_sampling_pts = pts;
-      pts.size().evaluate(function(n) {
-        Map.addLayer(pts, { color: 'e65100' }, 'Soil Sampling Points - Neyman (' + n + ')', true);
-        print('Soil Neyman sampling complete: ' + n + ' points.');
-        _afterPool();
+        runSoilPool();   // soil allocation + distribution AFTER forest+wetland
       });
     }
   );
