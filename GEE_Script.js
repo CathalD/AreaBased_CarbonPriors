@@ -1,28 +1,33 @@
 // =================================================================
-// Charlie's Place KBA — Forest Carbon Assessment v4.6
+// Area-Based Carbon Priors — Forest + Soil Carbon Assessment v4.6
 // =================================================================
 //
-//  ┌─────────────────────────────────────────────────────────────┐
-//  │  PARTNER SETUP — READ BEFORE RUNNING                          │
-//  ├─────────────────────────────────────────────────────────────┤
-//  │ 1. ACCESS: this script reads several Earth Engine assets that │
-//  │    must be shared with the account running it (or made        │
-//  │    public). Click [0] Check Asset Access first — it reports    │
-//  │    which assets are readable before you run anything.          │
-//  │    Required for the core analysis (Steps 2-9):                 │
-//  │      • AOI_ASSET            (your project boundary)            │
-//  │      • SOTHE_FC_UNC_ASSET   (Sothe forest-carbon uncertainty)  │
-//  │      • SOTHE_SC_UNC_ASSET   (Sothe soil-carbon uncertainty)    │
-//  │    Optional (Step 1 / Step 4b field-data exports only):        │
-//  │      • WOSIS / CANPEAT / COMBINED assets                       │
-//  │ 2. CONFIGURE: set AOI_ASSET to your boundary and adjust        │
-//  │    N_FOREST_SAMPLES / N_SOIL_SAMPLES in SECTION A. Whatever    │
-//  │    you enter is the EXACT number of points produced.          │
-//  │ 3. RUN: click [▶ RUN ALL] to execute Steps 2-9 in order, or    │
-//  │    run the numbered buttons one at a time.                     │
-//  │ 4. EXPORT: open the Tasks tab (top-right) and click Run on     │
-//  │    each export to save rasters / sampling points to Drive.     │
-//  └─────────────────────────────────────────────────────────────┘
+// ─────────────────────────────────────────────────────────────────
+//  HOW TO RUN (any AOI):
+//   STEP 0  Upload your boundary as a GEE asset (Assets tab, left),
+//           paste its ID into the "Load AOI Asset" box in the on-map
+//           panel, and click it. With AUTO_UTM the export CRS is set
+//           to the correct UTM zone automatically. You can also set
+//           AOI_ASSET in SECTION A instead of using the box.
+//   [0]     Click "[0] Check Asset Access" — confirms every required
+//           asset is readable before you run anything:
+//             • AOI_ASSET            (your boundary)
+//             • SOTHE_FC_UNC_ASSET   (Sothe forest-carbon uncertainty)
+//             • SOTHE_SC_UNC_ASSET   (Sothe soil-carbon uncertainty)
+//             • GWL_FCS30_ASSET      (wetland strata, Step 8)
+//           Optional (Step 1 / 4b field-data exports only):
+//             • WOSIS / CANPEAT / COMBINED assets
+//   CONFIG  Adjust N_FOREST_SAMPLES / N_SOIL_SAMPLES in SECTION A —
+//           whatever you enter is the EXACT number of points produced.
+//   RUN     Click [▶ RUN ALL] for Steps 2-9, or run the numbered
+//           buttons one at a time.
+//   EXPORT  Open the Tasks tab (top-right) and click Run on each
+//           export to save rasters / sampling points to Drive.
+//
+//   NOTE — the forest & soil PRIOR datasets (Sothe et al., SCANFI,
+//   SBFI, CanPeat / WOSIS) are Canadian, so the carbon priors are
+//   valid for AOIs within Canada; the workflow + UI are AOI-agnostic.
+// ─────────────────────────────────────────────────────────────────
 //
 // Changes from v4.5 (v4.6):
 //   CARBON UNITS — all forest members harmonised to AGB+BGB carbon
@@ -111,7 +116,11 @@
 // ─────────────────────────────────────────────────────────────────
 // SECTION A — CONFIGURATION
 // ─────────────────────────────────────────────────────────────────
-var AOI_ASSET      = 'projects/blue-carbon-hub/assets/Charlies_Place_KBA_boundaryFile_2025';
+// PROJECT_NAME is display-only (UI title + console banner). AOI_ASSET is the
+// GEE FeatureCollection boundary the whole pipeline runs over — set it here OR,
+// more conveniently, paste it into the Step 0 box in the UI at runtime.
+var PROJECT_NAME   = 'Area-Based Carbon Priors';
+var AOI_ASSET      = 'projects/your-gee-project/assets/your_aoi_boundary';  // ← change me (or use Step 0)
 var WOSIS_ASSET    = 'projects/north-star-project-470316/assets/wosis_layers_canada';
 var CANPEAT_ASSET  = 'projects/north-star-project-470316/assets/peat_profiles';
 var COMBINED_ASSET = 'projects/north-star-project-470316/assets/combined_profiles';
@@ -127,10 +136,15 @@ var SOTHE_SC_UNC_ASSET = 'projects/carbon-learning-library/assets/McMasterWWFCan
 var GWL_FCS30_ASSET = 'projects/sat-io/open-datasets/GWL_FCS30';
 var WETLAND_CODES   = [182, 183, 184, 185, 186, 187, 188];
 
-var EXPORT_CRS     = 'EPSG:32621';
+// AUTO_UTM = true → Step 0 derives the export CRS (the correct UTM zone) from
+// the AOI centroid, so the tool produces metric output anywhere on Earth.
+// Set false to pin EXPORT_CRS manually.
+var AUTO_UTM       = true;
+var EXPORT_CRS     = 'EPSG:32621';        // fallback / manual CRS (auto-set when AUTO_UTM)
 var EXPORT_SCALE   = 25;
-var EXPORT_FOLDER  = 'CharliesPlace_Carbon_2025';
+var EXPORT_FOLDER  = 'CarbonPriors_Exports';
 var SNAPSHOT_SCALE = 30;
+var AOI_BUFFER_M   = 50000;               // buffer (m) for context datasets around the AOI
 
 var EMBEDDING_YEAR = null;
 var EMBED_SCALE    = 10;
@@ -183,20 +197,69 @@ var AGBD_VIS = {
 
 
 // ─────────────────────────────────────────────────────────────────
-// SECTION B — AOI + CANADA BOUNDARY
+// SECTION B — AOI (loaded via Step 0; reusable on any GEE asset)
 // ─────────────────────────────────────────────────────────────────
-var aoiFC      = ee.FeatureCollection(AOI_ASSET);
-var aoi        = aoiFC.union().geometry();
-var aoi_buffer = aoi.buffer(50000);
+// AOI globals are populated by loadAOI() — at boot (from AOI_ASSET) and again
+// whenever the user loads a different asset via the Step 0 box. Keeping the
+// derivation in one function is what makes the tool reusable on ANY boundary.
+var aoiFC      = null;
+var aoi        = null;
+var aoi_buffer = null;
 
 var canada_boundary = ee.FeatureCollection('USDOS/LSIB_SIMPLE/2017')
   .filter(ee.Filter.eq('country_na', 'Canada'));
 
-Map.centerObject(aoi, 11);
-Map.addLayer(canada_boundary, { color: 'b0b0b0', fillColor: '00000000', width: 1 },
-  'Canada Boundary', false);
-Map.addLayer(aoiFC, { color: '000000', fillColor: '00000000', width: 2 },
-  'Conservation Project Boundary', false);
+// UTM zone EPSG from a lon/lat (326xx N hemisphere, 327xx S hemisphere).
+function utmEpsgFromLonLat(lon, lat) {
+  var zone = Math.floor((lon + 180) / 6) + 1;
+  return 'EPSG:' + ((lat >= 0 ? 32600 : 32700) + zone);
+}
+
+// (Re)point the entire pipeline at a GEE FeatureCollection asset. Validates the
+// asset, recentres the map, and — when AUTO_UTM — sets EXPORT_CRS to the UTM
+// zone covering the AOI centroid so exports are metric anywhere. Called at boot
+// and by the Step 0 "Load AOI Asset" button.
+function loadAOI(assetId, onReady) {
+  assetId = (assetId || '').trim();
+  if (!assetId) { setStatus('Step 0: paste a GEE asset ID first.'); return; }
+  AOI_ASSET  = assetId;
+  aoiFC      = ee.FeatureCollection(AOI_ASSET);
+  aoi        = aoiFC.union().geometry();
+  aoi_buffer = aoi.buffer(AOI_BUFFER_M);
+  setStatus('Step 0: loading AOI "' + assetId + '" ...');
+
+  aoiFC.size().evaluate(function(n, err) {
+    if (err || !n) {
+      setStatus('Step 0: cannot read AOI — check the ID and that it is shared.');
+      print('Step 0 AOI load FAILED for "' + assetId + '": ' + (err || 'asset empty or not found'));
+      return;
+    }
+    Map.layers().reset();
+    Map.addLayer(canada_boundary, { color: 'b0b0b0', fillColor: '00000000', width: 1 },
+      'Canada Boundary (context)', false);
+    Map.addLayer(aoiFC, { color: '000000', fillColor: '00000000', width: 2 }, 'AOI Boundary', true);
+    Map.centerObject(aoi);   // auto-fit zoom for any AOI size
+
+    var done = function() {
+      refreshConfigLabel();
+      setStatus('Step 0: AOI ready (' + n + ' feature[s]) — run [0] Check Asset Access, then [▶ RUN ALL].');
+      if (typeof onReady === 'function') onReady();
+    };
+    if (AUTO_UTM) {
+      aoi.centroid(1000).coordinates().evaluate(function(c) {
+        if (c && c.length === 2) {
+          EXPORT_CRS = utmEpsgFromLonLat(c[0], c[1]);
+          print('Step 0: AOI loaded (' + n + ' feature[s]). Export CRS auto-set to ' + EXPORT_CRS +
+                ' (UTM for centroid ' + c[1].toFixed(3) + '°N, ' + c[0].toFixed(3) + '°E).');
+        }
+        done();
+      });
+    } else {
+      print('Step 0: AOI loaded (' + n + ' feature[s]). Export CRS = ' + EXPORT_CRS + ' (manual).');
+      done();
+    }
+  });
+}
 
 
 // ─────────────────────────────────────────────────────────────────
@@ -363,6 +426,20 @@ var progressSteps  = [
   '[ ] Step 9: Exports queued'
 ];
 var mainPanel = null;
+var configLabel = null;   // dynamic config readout (updated when EXPORT_CRS changes)
+var aoiInput    = null;   // Step 0 asset-ID textbox
+
+// Refresh the small config readout at the bottom of the panel. Called after the
+// AOI (and, with AUTO_UTM, the export CRS) is (re)loaded in Step 0.
+function refreshConfigLabel() {
+  if (!configLabel) return;
+  configLabel.setValue(
+    'Scale: ' + EXPORT_SCALE + ' m | CRS: ' + EXPORT_CRS + (AUTO_UTM ? ' (auto-UTM)' : '') + '\n' +
+    'Forest: ' + N_FOREST_SAMPLES + ' pts | Soil: ' + N_SOIL_SAMPLES + ' pts (exact)\n' +
+    'Carbon: AGB+BGB | AGB→C ×' + AGB_TO_C_KGM2.toFixed(3) + '\n' +
+    'Ensemble: inv-var weighting (1/σ²) per pool\n' +
+    'Sampling: Neyman (exact n) | strata: Forest + Wetland | unc bins: ' + N_UNC_BINS);
+}
 
 function markDone(idx) {
   if (!progressLabels[idx]) return;
@@ -403,11 +480,28 @@ function initUI() {
   mainPanel = ui.Panel({
     style: { width: '290px', padding: '14px', position: 'top-left', backgroundColor: '#ffffff' }
   });
-  mainPanel.add(ui.Label("Charlie's Place KBA", {
+  mainPanel.add(ui.Label(PROJECT_NAME, {
     fontWeight: 'bold', fontSize: '16px', color: '#111111', margin: '0 0 2px 0'
   }));
-  mainPanel.add(ui.Label('Forest Carbon Assessment v4.6', {
+  mainPanel.add(ui.Label('Forest + Soil Carbon Assessment v4.6', {
     fontSize: '12px', color: '#555555', margin: '0 0 12px 0'
+  }));
+
+  mainPanel.add(makeSectionLabel('STEP 0 — LOAD YOUR AOI ASSET'));
+  mainPanel.add(ui.Label(
+    'Upload your boundary in the Assets tab (left), then paste its asset ID:',
+    { fontSize: '10px', color: '#555555', margin: '0 0 3px 0', whiteSpace: 'pre-wrap' }));
+  aoiInput = ui.Textbox({
+    placeholder: 'projects/your-project/assets/your_aoi_boundary',
+    value: AOI_ASSET,
+    style: { width: '258px', margin: '2px 0', fontSize: '10px' }
+  });
+  mainPanel.add(aoiInput);
+  mainPanel.add(ui.Button({
+    label: '↑ Load AOI Asset',
+    onClick: function() { loadAOI(aoiInput.getValue()); },
+    style: { width: '260px', margin: '2px 0 8px 0', fontSize: '11px',
+             color: '#ffffff', backgroundColor: '#1565c0', fontWeight: 'bold' }
   }));
 
   mainPanel.add(makeSectionLabel('SETUP / ONE-CLICK'));
@@ -439,18 +533,13 @@ function initUI() {
   });
   mainPanel.add(progressPanel);
   mainPanel.add(makeSectionLabel('STATUS'));
-  statusLabel = ui.Label('Ready - click [1] to begin.', {
+  statusLabel = ui.Label('Ready — load your AOI in Step 0 to begin.', {
     fontSize: '11px', color: '#333333', margin: '0 0 10px 0'
   });
   mainPanel.add(statusLabel);
-  mainPanel.add(ui.Label(
-    'Scale: ' + EXPORT_SCALE + 'm | CRS: UTM Zone 21N\n' +
-    'Forest: ' + N_FOREST_SAMPLES + ' pts | Soil: ' + N_SOIL_SAMPLES + ' pts (exact)\n' +
-    'Carbon: AGB+BGB | AGB→C ×' + AGB_TO_C_KGM2.toFixed(3) + '\n' +
-    'Ensemble: inv-var weighting (1/σ²) per pool\n' +
-    'Sampling: Neyman (exact n) | strata: Forest + Wetland | unc bins: ' + N_UNC_BINS,
-    { fontSize: '9px', color: '#aaaaaa', margin: '4px 0 0 0', whiteSpace: 'pre' }
-  ));
+  configLabel = ui.Label('', { fontSize: '9px', color: '#aaaaaa', margin: '4px 0 0 0', whiteSpace: 'pre' });
+  mainPanel.add(configLabel);
+  refreshConfigLabel();
   Map.add(mainPanel);
 }
 
@@ -490,9 +579,9 @@ function step4b_exportCovariateSnapshot() {
     names.forEach(function(b, i) { print('  ' + (i+1) + '. ' + b); });
   });
 
-  Export.image.toDrive({ image: snapshot.toFloat(), description: 'CharliesPlace_Covariate_Snapshot_30m',
+  Export.image.toDrive({ image: snapshot.toFloat(), description: 'Covariate_Snapshot_30m',
     folder: EXPORT_FOLDER, region: aoi, scale: SNAPSHOT_SCALE, crs: EXPORT_CRS, maxPixels: 1e13 });
-  Export.image.toDrive({ image: embed_img.clip(aoi).toFloat(), description: 'CharliesPlace_GoogleEmbedding_V1_10m',
+  Export.image.toDrive({ image: embed_img.clip(aoi).toFloat(), description: 'GoogleEmbedding_V1_10m',
     folder: EXPORT_FOLDER, region: aoi, scale: EMBED_SCALE, crs: EXPORT_CRS, maxPixels: 1e13 });
 
   var combined     = ee.FeatureCollection(COMBINED_ASSET);
@@ -1983,7 +2072,7 @@ function runAll() {
 // ─────────────────────────────────────────────────────────────────
 // BOOT
 // ─────────────────────────────────────────────────────────────────
-print("=== Charlie's Place KBA - Forest Carbon Assessment v4.6 ===");
+print('=== ' + PROJECT_NAME + ' — Forest + Soil Carbon Assessment v4.6 ===');
 print('CRS: ' + EXPORT_CRS + ' | Scale: ' + EXPORT_SCALE + ' m');
 print('Forest: ' + N_FOREST_SAMPLES + ' pts | Soil: ' + N_SOIL_SAMPLES + ' pts (EXACT)');
 print('Carbon: AGB→C factor = ' + AGB_TO_C_KGM2.toFixed(3) +
@@ -1994,6 +2083,9 @@ print('Soil   σ: Sothe SC = per-pixel | SoilGrids = standardized(Sothe unc + in
 print('Sampling: Neyman (largest-remainder, exact n) | strata: Forest + Wetland (GWL_FCS30) × ' + N_UNC_BINS + ' unc bins');
 print('Partner flow: [0] Check Asset Access → [▶ RUN ALL] → Tasks tab → run exports.');
 
-try { initUI(); } catch(e) {
+try {
+  initUI();
+  loadAOI(AOI_ASSET);   // boot: load the AOI configured in SECTION A (or use the Step 0 box)
+} catch(e) {
   print('Panel already rendered - hard refresh (Ctrl+Shift+R) to fully reset.');
 }

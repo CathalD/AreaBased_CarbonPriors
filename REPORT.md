@@ -1,13 +1,15 @@
-# Charlie's Place KBA — Forest & Soil Carbon Prior Assessment and Field-Sampling Design
+# Area-Based Carbon Priors — Forest & Soil Carbon Prior Assessment and Field-Sampling Design
 
 **Version:** v4.6 · **Prepared:** 2026 · **Pipeline:** `GEE_Script.js` (Google Earth Engine)
-**Area of interest (AOI):** Charlie's Place Key Biodiversity Area (KBA), Canada
-**Projection / scale:** EPSG:32621 (UTM Zone 21N) · forest 25 m, soil 250 m native
+**Area of interest (AOI):** *set per project — any GEE FeatureCollection boundary loaded in Step 0 (carbon priors valid for AOIs within Canada)*
+**Projection / scale:** UTM, auto-selected from the AOI centroid (`AUTO_UTM`; example run EPSG:32621 / UTM Zone 21N) · forest 25 m, soil 250 m native
 
-> **Note on numbers.** All figures below are from a full end-to-end run of
-> `GEE_Script.js` v4.6 (`[▶ RUN ALL]`, `N_UNC_BINS = 3`, forest n = 10, soil n = 12)
-> over the Charlie's Place KBA AOI. AOI-mean stats use Earth Engine `bestEffort`
-> reductions and may vary ~±0.2 kg/m² between runs (see §8); exports are deterministic.
+> **Note on numbers.** This is a reusable report template. The figures below come
+> from one example end-to-end run of `GEE_Script.js` v4.6 (`[▶ RUN ALL]`,
+> `N_UNC_BINS = 3`, forest n = 10, soil n = 12) over a Canadian AOI; re-run the
+> pipeline on your own boundary and substitute the printed values. AOI-mean stats
+> use Earth Engine `bestEffort` reductions and may vary ~±0.2 kg/m² between runs
+> (see §8); exports are deterministic.
 
 ---
 
@@ -36,10 +38,10 @@ button verifies up front that every required dataset is readable.
 
 ## 2. Study area
 
-Charlie's Place KBA, defined by the boundary asset
-`projects/blue-carbon-hub/assets/Charlies_Place_KBA_boundaryFile_2025`. The pipeline
-buffers the AOI by 50 km for sampling remote-sensing predictors, then clips all
-outputs to the boundary.
+The project AOI, defined by the boundary asset loaded in Step 0
+(`AOI_ASSET`, e.g. `projects/your-gee-project/assets/your_aoi_boundary`). The pipeline
+buffers the AOI by 50 km (`AOI_BUFFER_M`) for sampling remote-sensing predictors, then
+clips all outputs to the boundary.
 
 - AOI area: **8,438.8 ha**
 - Dominant land cover (ESA WorldCover): predominantly **forest**, with minor
